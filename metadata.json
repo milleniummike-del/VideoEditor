@@ -1,0 +1,7 @@
+{
+  "name": "LuminaCreate",
+  "description": "A professional-grade, browser-based non-linear video editor utilizing Canvas API for compositing and Gemini for intelligent metadata generation.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
