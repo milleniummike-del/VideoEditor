@@ -98,13 +98,29 @@ const ProjectManager: React.FC<ProjectManagerProps> = ({
   };
 
   const handleExportJSON = () => {
-      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(currentProject));
-      const downloadAnchorNode = document.createElement('a');
-      downloadAnchorNode.setAttribute("href", dataStr);
-      downloadAnchorNode.setAttribute("download", (currentProject.name || "project") + ".json");
-      document.body.appendChild(downloadAnchorNode);
-      downloadAnchorNode.click();
-      downloadAnchorNode.remove();
+      try {
+          const jsonString = JSON.stringify(currentProject, null, 2);
+          const blob = new Blob([jsonString], { type: "application/json" });
+          const url = URL.createObjectURL(blob);
+          
+          const link = document.createElement('a');
+          link.href = url;
+          // Sanitize filename to be safe
+          const filename = (currentProject.name || "project").replace(/[^a-z0-9]/gi, '_').toLowerCase();
+          link.download = `${filename}.json`;
+          
+          document.body.appendChild(link);
+          link.click();
+          
+          // Cleanup
+          setTimeout(() => {
+              document.body.removeChild(link);
+              URL.revokeObjectURL(url);
+          }, 100);
+      } catch (e) {
+          console.error("Export failed:", e);
+          alert("Failed to export project to JSON.");
+      }
   };
 
   const handleImportJSON = (e: React.ChangeEvent<HTMLInputElement>) => {
