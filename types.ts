@@ -1,3 +1,11 @@
+
+export interface LibraryClip {
+  name: string;
+  url: string;
+  duration: number;
+  type: 'video' | 'audio';
+}
+
 export interface Clip {
   id: string;
   name: string;
@@ -8,6 +16,8 @@ export interface Clip {
   offset: number;   // Start time on timeline
   track: number;    // Track index
   type: 'video' | 'audio';
+  fadeIn?: number;  // Duration in seconds
+  fadeOut?: number; // Duration in seconds
 }
 
 export interface Track {
@@ -19,6 +29,8 @@ export interface Track {
 }
 
 export interface ProjectState {
+  name?: string;
+  library: LibraryClip[];
   clips: Clip[];
   tracks: Track[];
   duration: number;

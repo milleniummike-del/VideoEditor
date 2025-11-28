@@ -1,63 +1,51 @@
 
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import { ProjectState, Clip, Track, GeminiAnalysis } from './types';
+import { ProjectState, Clip, Track, LibraryClip } from './types';
 import { INITIAL_TRACKS, STOCK_CLIPS, PIXELS_PER_SECOND_DEFAULT, RESOLUTIONS } from './constants';
 import Timeline from './components/Timeline';
 import Player from './components/Player';
 import Toolbar from './components/Toolbar';
-import { generateProjectMetadata } from './services/geminiService';
-
-interface LibraryClip {
-  name: string;
-  url: string;
-  duration: number;
-  type: 'video' | 'audio';
-}
+import ProjectManager from './components/ProjectManager';
 
 const App: React.FC = () => {
-  // Initialize from LocalStorage or empty array
-  const [libraryClips, setLibraryClips] = useState<LibraryClip[]>(() => {
-    try {
-        const saved = localStorage.getItem('lumina_library');
-        if (saved) {
-            const parsed = JSON.parse(saved);
-            // Migration for old data without type
-            return parsed.map((c: any) => ({ ...c, type: c.type || 'video' }));
-        }
-        return [];
-    } catch (e) {
-        return [];
-    }
-  });
-  
   const [mediaUrl, setMediaUrl] = useState('');
   const [mediaType, setMediaType] = useState<'video' | 'audio'>('video');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [project, setProject] = useState<ProjectState>({
-    clips: [],
-    tracks: INITIAL_TRACKS,
-    duration: 30, // Initial workspace duration
-    currentTime: 0,
-    isPlaying: false,
-    selectedClipId: null,
-    zoom: PIXELS_PER_SECOND_DEFAULT,
-    width: RESOLUTIONS[0].width,
-    height: RESOLUTIONS[0].height,
+  const [project, setProject] = useState<ProjectState>(() => {
+    // Migration: Check for old library data in localStorage
+    let initialLibrary: LibraryClip[] = [];
+    try {
+        const savedLib = localStorage.getItem('lumina_library');
+        if (savedLib) {
+            const parsed = JSON.parse(savedLib);
+            initialLibrary = parsed.map((c: any) => ({ ...c, type: c.type || 'video' }));
+        }
+    } catch (e) {
+        // ignore
+    }
+
+    return {
+        clips: [],
+        library: initialLibrary,
+        tracks: INITIAL_TRACKS,
+        duration: 30, // Initial workspace duration
+        currentTime: 0,
+        isPlaying: false,
+        selectedClipId: null,
+        zoom: PIXELS_PER_SECOND_DEFAULT,
+        width: RESOLUTIONS[0].width,
+        height: RESOLUTIONS[0].height,
+    };
   });
 
-  const [aiMetadata, setAiMetadata] = useState<GeminiAnalysis | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  
   // Export State
   const [isExporting, setIsExporting] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportSettings, setExportSettings] = useState({ start: 0, end: 0 });
 
-  // Save library to LocalStorage
-  useEffect(() => {
-    localStorage.setItem('lumina_library', JSON.stringify(libraryClips));
-  }, [libraryClips]);
+  // Project Manager State
+  const [showProjectManager, setShowProjectManager] = useState(false);
 
   const handleTimeUpdate = useCallback((time: number) => {
     setProject(p => {
@@ -125,7 +113,7 @@ const App: React.FC = () => {
             duration: duration || 10,
             type: type
         };
-        setLibraryClips(prev => [...prev, newClip]);
+        setProject(p => ({ ...p, library: [...p.library, newClip] }));
         tempMedia.remove();
         
         // Reset input so same file can be selected again
@@ -142,6 +130,8 @@ const App: React.FC = () => {
   const handleAddMedia = () => {
     if (!mediaUrl.trim()) return;
     
+    const url = mediaUrl.trim();
+    
     // Create temp element to check duration and validity
     let tempMedia: HTMLVideoElement | HTMLAudioElement;
     if (mediaType === 'video') {
@@ -150,39 +140,56 @@ const App: React.FC = () => {
         tempMedia = document.createElement('audio');
     }
     
-    tempMedia.src = mediaUrl.trim();
+    // IMPORTANT: Set crossOrigin BEFORE src to ensure correct CORS request
     tempMedia.crossOrigin = "anonymous";
     
-    // We need to wait for metadata to get duration
-    tempMedia.onloadedmetadata = () => {
+    const handleSuccess = () => {
         const duration = tempMedia.duration;
         if (duration && !isNaN(duration) && duration !== Infinity) {
              const newClip: LibraryClip = {
-                name: `${mediaType === 'video' ? 'Video' : 'Audio'} ${libraryClips.length + 1}`,
-                url: mediaUrl.trim(),
+                name: `${mediaType === 'video' ? 'Video' : 'Audio'} ${project.library.length + 1}`,
+                url: tempMedia.src,
                 duration: duration, 
                 type: mediaType
             };
-            setLibraryClips(prev => [...prev, newClip]);
+            setProject(p => ({ ...p, library: [...p.library, newClip] }));
             setMediaUrl('');
         } else {
-            alert(`Could not determine ${mediaType} duration. The format might not be supported or duration is infinite (stream).`);
+            alert(`Could not determine ${mediaType} duration. The format might not be supported.`);
         }
         tempMedia.remove();
     };
 
-    tempMedia.onerror = () => {
-        alert("Failed to load media. Please check the URL and ensure it allows CORS if external.");
-        tempMedia.remove();
+    const handleError = () => {
+        // If the src is not already using the proxy, try the proxy
+        if (!tempMedia.src.includes('corsproxy.io')) {
+            console.log("Direct load failed, attempting CORS proxy...");
+            // Use a public CORS proxy to bypass headers issue
+            // We use encodeURIComponent to ensure special chars in URL are handled
+            tempMedia.src = `https://corsproxy.io/?${encodeURIComponent(url)}`;
+        } else {
+            // Already tried proxy and failed
+            alert("Failed to load media. The resource likely restricts access or does not support CORS even via proxy.");
+            tempMedia.remove();
+        }
     };
+
+    tempMedia.onloadedmetadata = handleSuccess;
+    tempMedia.onerror = handleError;
+    
+    // Initial attempt: Direct URL
+    tempMedia.src = url;
   };
 
   const handleDeleteFromLibrary = (index: number) => {
-      setLibraryClips(prev => prev.filter((_, i) => i !== index));
+      setProject(p => ({
+          ...p,
+          library: p.library.filter((_, i) => i !== index)
+      }));
   };
 
   const handleAddClip = (index: number) => {
-    const stock = libraryClips[index];
+    const stock = project.library[index];
     
     // Find appropriate track based on type
     // If Video, find video track. If Audio, find audio track.
@@ -202,12 +209,18 @@ const App: React.FC = () => {
       end: stock.duration,
       offset: project.currentTime, // Add at playhead
       track: targetTrack.id,
-      type: stock.type
+      type: stock.type,
+      fadeIn: 0,
+      fadeOut: 0
     };
+    
+    const newEndTime = newClip.offset + newClip.duration;
+    
     setProject(p => ({
         ...p,
         clips: [...p.clips, newClip],
-        duration: Math.max(p.duration, newClip.offset + newClip.duration + 10)
+        duration: Math.max(p.duration, newEndTime + 10),
+        currentTime: newEndTime // Jump to end of new clip
     }));
   };
 
@@ -247,7 +260,8 @@ const App: React.FC = () => {
         id: crypto.randomUUID(),
         start: splitPointSource,
         end: clip.end,
-        offset: project.currentTime
+        offset: project.currentTime,
+        fadeIn: 0 // Reset fade for new split part
     };
 
     setProject(p => ({
@@ -264,31 +278,6 @@ const App: React.FC = () => {
         clips: p.clips.filter(c => c.id !== p.selectedClipId),
         selectedClipId: null
     }));
-  };
-
-  const handleAiAnalysis = async () => {
-    // Paywall Check
-    if ((window as any).aistudio) {
-        try {
-            const hasKey = await (window as any).aistudio.hasSelectedApiKey();
-            if (!hasKey) {
-                await (window as any).aistudio.openSelectKey();
-            }
-        } catch (e) {
-            console.error("Paywall check error:", e);
-        }
-    }
-
-    setIsAnalyzing(true);
-    try {
-        const result = await generateProjectMetadata(project.clips);
-        setAiMetadata(result);
-    } catch (e) {
-        alert("Failed to analyze project. Please ensure you have a valid API Key.");
-        console.error(e);
-    } finally {
-        setIsAnalyzing(false);
-    }
   };
 
   const handleExportClick = () => {
@@ -331,6 +320,29 @@ const App: React.FC = () => {
       }
   };
 
+  const handleLoadProject = (loadedProject: ProjectState) => {
+    // If the project object is null or undefined (e.g. cancelled load), do nothing
+    if (!loadedProject) return;
+
+    // Sanitize and default missing fields to prevent crashes with old/malformed JSONs
+    // Create a new object to ensure state update triggers
+    const safeProject: ProjectState = {
+        name: loadedProject.name || "Imported Project",
+        library: Array.isArray(loadedProject.library) ? loadedProject.library : [],
+        clips: Array.isArray(loadedProject.clips) ? loadedProject.clips : [],
+        tracks: Array.isArray(loadedProject.tracks) ? loadedProject.tracks : INITIAL_TRACKS,
+        duration: typeof loadedProject.duration === 'number' ? loadedProject.duration : 30,
+        currentTime: 0,
+        isPlaying: false,
+        selectedClipId: null,
+        zoom: loadedProject.zoom || PIXELS_PER_SECOND_DEFAULT,
+        width: loadedProject.width || RESOLUTIONS[0].width,
+        height: loadedProject.height || RESOLUTIONS[0].height,
+    };
+
+    setProject(safeProject);
+  };
+
   // Calculate player display dimensions to fit within a container while maintaining aspect ratio
   const playerDimensions = useMemo(() => {
       const maxWidth = 800;
@@ -349,6 +361,10 @@ const App: React.FC = () => {
       return { width: w, height: h };
   }, [project.width, project.height]);
 
+  const selectedClip = project.selectedClipId 
+    ? project.clips.find(c => c.id === project.selectedClipId) 
+    : null;
+
   return (
     <div className="flex flex-col h-screen bg-gray-950 text-white font-sans">
       {/* Header / Toolbar */}
@@ -359,16 +375,20 @@ const App: React.FC = () => {
         onDelete={handleDelete}
         onTogglePlay={handleTogglePlay}
         onExport={handleExportClick}
-        onAnalysis={handleAiAnalysis}
+        onOpenProjectManager={() => setShowProjectManager(true)}
       />
 
       <div className="flex-1 flex overflow-hidden relative">
         {/* Sidebar / Media Library */}
-        <div className="w-64 bg-gray-900 border-r border-gray-800 p-4 flex flex-col">
+        <div className="w-64 bg-gray-900 border-r border-gray-800 p-4 flex flex-col overflow-y-auto custom-scrollbar">
            
            {/* Project Settings */}
            <div className="mb-6 border-b border-gray-800 pb-4">
                <h2 className="text-sm font-semibold text-gray-400 uppercase mb-3">Project Settings</h2>
+               <div className="mb-3">
+                 <div className="text-[10px] text-gray-500 mb-1 block uppercase tracking-wider">Project Name</div>
+                 <div className="text-sm font-medium text-white">{project.name || "Untitled Project"}</div>
+               </div>
                <div>
                    <label className="text-[10px] text-gray-500 mb-1 block uppercase tracking-wider">Resolution</label>
                    <select 
@@ -382,6 +402,41 @@ const App: React.FC = () => {
                    </select>
                </div>
            </div>
+
+           {/* Selected Clip Properties */}
+           {selectedClip && (
+               <div className="mb-6 border-b border-gray-800 pb-4 animate-in fade-in slide-in-from-left-2 duration-200">
+                   <h2 className="text-sm font-semibold text-blue-400 uppercase mb-3">Selected Clip</h2>
+                   <div className="text-xs font-medium text-white mb-2 truncate">{selectedClip.name}</div>
+                   
+                   <div className="grid grid-cols-2 gap-3">
+                       <div>
+                           <label className="text-[10px] text-gray-500 mb-1 block">Fade In (s)</label>
+                           <input 
+                               type="number" 
+                               min="0"
+                               max="5"
+                               step="0.1"
+                               value={selectedClip.fadeIn || 0}
+                               onChange={(e) => handleUpdateClip({...selectedClip, fadeIn: Number(e.target.value)})}
+                               className="w-full bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1 focus:outline-none focus:border-blue-500"
+                           />
+                       </div>
+                       <div>
+                           <label className="text-[10px] text-gray-500 mb-1 block">Fade Out (s)</label>
+                           <input 
+                               type="number" 
+                               min="0"
+                               max="5"
+                               step="0.1"
+                               value={selectedClip.fadeOut || 0}
+                               onChange={(e) => handleUpdateClip({...selectedClip, fadeOut: Number(e.target.value)})}
+                               className="w-full bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1 focus:outline-none focus:border-blue-500"
+                           />
+                       </div>
+                   </div>
+               </div>
+           )}
 
            <h2 className="text-sm font-semibold text-gray-400 uppercase mb-4">Media Library</h2>
            
@@ -439,15 +494,18 @@ const App: React.FC = () => {
                     <svg className="w-3 h-3 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
                     Upload File
                 </button>
+                <div className="mt-1 text-[9px] text-gray-500 italic text-center">
+                    Note: Uploaded files are not saved permanently in projects.
+                </div>
               </div>
            </div>
 
            <div className="text-[10px] text-gray-500 mb-2 uppercase tracking-wider">Clips</div>
-           {libraryClips.length === 0 ? (
+           {project.library.length === 0 ? (
                <div className="text-xs text-gray-600 italic">No clips in library.</div>
            ) : (
-             <div className="space-y-3 overflow-y-auto flex-1 pr-1 custom-scrollbar">
-               {libraryClips.map((clip, idx) => (
+             <div className="space-y-3 pb-4">
+               {project.library.map((clip, idx) => (
                  <div key={idx} className="relative group p-3 bg-gray-800 rounded hover:bg-gray-700 transition cursor-pointer border border-transparent hover:border-gray-600" onClick={() => handleAddClip(idx)}>
                     <div className="flex items-center justify-between mb-1">
                         <div className="text-sm font-medium text-white truncate max-w-[110px]">{clip.name}</div>
@@ -472,26 +530,6 @@ const App: React.FC = () => {
              </div>
            )}
            
-           {/* AI Metadata Display */}
-           {isAnalyzing && <div className="mt-8 p-4 bg-gray-800/50 rounded animate-pulse text-xs">Gemini is analyzing your timeline...</div>}
-           {aiMetadata && (
-               <div className="mt-auto border-t border-gray-800 pt-4">
-                   <h3 className="text-xs font-bold text-purple-400 uppercase mb-2">AI Suggestion</h3>
-                   <div className="mb-2">
-                       <label className="text-[10px] text-gray-500">Title</label>
-                       <p className="text-sm font-semibold">{aiMetadata.title}</p>
-                   </div>
-                   <div className="mb-2">
-                       <label className="text-[10px] text-gray-500">Description</label>
-                       <p className="text-xs text-gray-300 line-clamp-3">{aiMetadata.description}</p>
-                   </div>
-                   <div className="flex flex-wrap gap-1">
-                       {aiMetadata.tags.map(tag => (
-                           <span key={tag} className="text-[10px] bg-purple-900/50 text-purple-300 px-2 py-0.5 rounded-full">#{tag}</span>
-                       ))}
-                   </div>
-               </div>
-           )}
         </div>
 
         {/* Main Content Area */}
@@ -539,6 +577,14 @@ const App: React.FC = () => {
                 />
             </div>
         </div>
+
+        {/* Project Manager Modal */}
+        <ProjectManager 
+            isOpen={showProjectManager} 
+            onClose={() => setShowProjectManager(false)} 
+            currentProject={project}
+            onLoadProject={handleLoadProject}
+        />
 
         {/* Export Configuration Modal */}
         {showExportModal && (

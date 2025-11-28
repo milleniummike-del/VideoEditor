@@ -32,6 +32,7 @@ const Player: React.FC<PlayerProps> = ({
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioDestinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const sourceNodesRef = useRef<Map<string, MediaElementAudioSourceNode>>(new Map());
+  const gainNodesRef = useRef<Map<string, GainNode>>(new Map());
 
   const requestRef = useRef<number | null>(null);
   const [isMediaLoaded, setIsMediaLoaded] = useState(false);
@@ -70,9 +71,14 @@ const Player: React.FC<PlayerProps> = ({
             videoRefs.current.delete(id);
             // Also disconnect audio source if exists
             const source = sourceNodesRef.current.get(id);
+            const gain = gainNodesRef.current.get(id);
             if (source) {
                 source.disconnect();
                 sourceNodesRef.current.delete(id);
+            }
+            if (gain) {
+                gain.disconnect();
+                gainNodesRef.current.delete(id);
             }
         }
     }
@@ -81,10 +87,15 @@ const Player: React.FC<PlayerProps> = ({
             audio.pause();
             audio.src = "";
             audioRefs.current.delete(id);
-             const source = sourceNodesRef.current.get(id);
+            const source = sourceNodesRef.current.get(id);
+            const gain = gainNodesRef.current.get(id);
             if (source) {
                 source.disconnect();
                 sourceNodesRef.current.delete(id);
+            }
+            if (gain) {
+                gain.disconnect();
+                gainNodesRef.current.delete(id);
             }
         }
     }
@@ -94,22 +105,35 @@ const Player: React.FC<PlayerProps> = ({
       if (clip.type === 'video') {
         if (!videoRefs.current.has(clip.id)) {
             const video = document.createElement('video');
+            video.crossOrigin = "anonymous"; // Set before src
             video.src = clip.url;
-            video.crossOrigin = "anonymous";
             video.preload = "auto";
             video.muted = false; // We use WebAudio to capture it
             
             video.onloadedmetadata = () => {
                 setIsMediaLoaded(prev => !prev);
             };
+            
+            // Critical: Handle errors (e.g. expired blob URLs) so app doesn't hang
+            video.onerror = () => {
+                console.error(`Failed to load video clip: ${clip.name} (${clip.url})`);
+                // Mark loaded anyway so the UI doesn't block
+                setIsMediaLoaded(prev => !prev);
+            };
+
             videoRefs.current.set(clip.id, video);
 
             // Connect Audio
             try {
                 const source = actx.createMediaElementSource(video);
-                source.connect(actx.destination); // For local playback
-                source.connect(dest); // For export stream
+                const gain = actx.createGain();
+                
+                source.connect(gain);
+                gain.connect(actx.destination); // For local playback
+                gain.connect(dest); // For export stream
+                
                 sourceNodesRef.current.set(clip.id, source);
+                gainNodesRef.current.set(clip.id, gain);
             } catch (e) {
                 console.warn("Audio Context Error (Video):", e);
             }
@@ -117,21 +141,34 @@ const Player: React.FC<PlayerProps> = ({
       } else if (clip.type === 'audio') {
         if (!audioRefs.current.has(clip.id)) {
             const audio = document.createElement('audio');
+            audio.crossOrigin = "anonymous"; // Set before src
             audio.src = clip.url;
-            audio.crossOrigin = "anonymous";
             audio.preload = "auto";
             
             audio.onloadedmetadata = () => {
                 setIsMediaLoaded(prev => !prev);
             };
+
+            // Critical: Handle errors
+            audio.onerror = () => {
+                console.error(`Failed to load audio clip: ${clip.name} (${clip.url})`);
+                // Mark loaded anyway so the UI doesn't block
+                setIsMediaLoaded(prev => !prev);
+            };
+
             audioRefs.current.set(clip.id, audio);
 
             // Connect Audio
             try {
                 const source = actx.createMediaElementSource(audio);
-                source.connect(actx.destination);
-                source.connect(dest);
+                const gain = actx.createGain();
+
+                source.connect(gain);
+                gain.connect(actx.destination);
+                gain.connect(dest);
+                
                 sourceNodesRef.current.set(clip.id, source);
+                gainNodesRef.current.set(clip.id, gain);
             } catch (e) {
                 console.warn("Audio Context Error (Audio):", e);
             }
@@ -288,46 +325,73 @@ const Player: React.FC<PlayerProps> = ({
              if (clipTime >= clip.duration) {
                  mediaEl.pause();
              }
+
+             // Handle Fading (Audio Volume)
+             const gainNode = gainNodesRef.current.get(clip.id);
+             let alpha = 1;
+             
+             const relativeTime = currentTime - clip.offset;
+             const remainingTime = (clip.offset + (clip.end - clip.start)) - currentTime;
+
+             if (clip.fadeIn && clip.fadeIn > 0 && relativeTime < clip.fadeIn) {
+                 alpha = relativeTime / clip.fadeIn;
+             } else if (clip.fadeOut && clip.fadeOut > 0 && remainingTime < clip.fadeOut) {
+                 alpha = remainingTime / clip.fadeOut;
+             }
+             
+             if (gainNode) {
+                 // Ensure mute logic is respected if we had track mute, but for now just fade
+                 gainNode.gain.value = alpha; 
+             }
+             
+             // Store alpha for video drawing
+             (clip as any)._renderAlpha = alpha; 
         }
     });
 
-    // 2. Pause inactive clips to prevent background audio leaks
-    project.clips.forEach(clip => {
-        const isActive = currentTime >= clip.offset && currentTime < clip.offset + (clip.end - clip.start);
-        if (!isActive) {
-            let mediaEl: HTMLMediaElement | undefined;
-            if (clip.type === 'video') mediaEl = videoRefs.current.get(clip.id);
-            else mediaEl = audioRefs.current.get(clip.id);
-
-            if (mediaEl && !mediaEl.paused) {
-                mediaEl.pause();
+    // 2. Draw Video Frames (Sorted by track to respect layers)
+    activeClips
+        .filter(c => c.type === 'video')
+        .sort((a, b) => a.track - b.track)
+        .forEach(clip => {
+            const video = videoRefs.current.get(clip.id);
+            if (video && video.readyState >= 2) {
+                // Calculate Aspect Ratio Fit (Letterbox)
+                const vw = video.videoWidth;
+                const vh = video.videoHeight;
+                const canvasAspect = canvasWidth / canvasHeight;
+                const videoAspect = vw / vh;
+                
+                let drawW, drawH, offsetX, offsetY;
+                
+                if (videoAspect > canvasAspect) {
+                    // Video is wider than canvas
+                    drawW = canvasWidth;
+                    drawH = canvasWidth / videoAspect;
+                    offsetX = 0;
+                    offsetY = (canvasHeight - drawH) / 2;
+                } else {
+                    // Video is taller than canvas
+                    drawH = canvasHeight;
+                    drawW = canvasHeight * videoAspect;
+                    offsetY = 0;
+                    offsetX = (canvasWidth - drawW) / 2;
+                }
+                
+                // Apply Fade Opacity
+                const alpha = (clip as any)._renderAlpha !== undefined ? (clip as any)._renderAlpha : 1;
+                ctx.globalAlpha = alpha;
+                
+                ctx.drawImage(video, offsetX, offsetY, drawW, drawH);
+                
+                ctx.globalAlpha = 1.0; // Reset
             }
-        }
-    });
-
-
-    // 3. Draw Video Clips to Canvas
-    const activeVideoClips = activeClips
-      .filter(c => c.type === 'video')
-      .sort((a, b) => a.track - b.track);
-
-    activeVideoClips.forEach(clip => {
-      const video = videoRefs.current.get(clip.id);
-      if (video && video.readyState >= 2) {
-        // Calculate Aspect Ratio Fit (Contain / Letterbox)
-        const scale = Math.min(canvasWidth / video.videoWidth, canvasHeight / video.videoHeight);
-        const dWidth = video.videoWidth * scale;
-        const dHeight = video.videoHeight * scale;
-        const dx = (canvasWidth - dWidth) / 2;
-        const dy = (canvasHeight - dHeight) / 2;
-
-        ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight, dx, dy, dWidth, dHeight);
-      }
-    });
+        });
 
     requestRef.current = requestAnimationFrame(renderFrame);
-  }, [project.currentTime, project.clips, project.isPlaying, project.duration, project.width, project.height, isExporting, exportEndTime, onTimeUpdate]);
+  }, [project.clips, project.currentTime, project.isPlaying, project.width, project.height, onTimeUpdate, isExporting, exportEndTime]);
 
+  // Start/Stop Loop
   useEffect(() => {
     requestRef.current = requestAnimationFrame(renderFrame);
     return () => {
@@ -336,18 +400,26 @@ const Player: React.FC<PlayerProps> = ({
   }, [renderFrame]);
 
   return (
-    <div className="relative bg-black rounded-lg overflow-hidden shadow-2xl border border-gray-800 flex items-center justify-center" style={{ width, height }}>
+    <div className="relative shadow-2xl bg-black" style={{ width, height }}>
+      {/* Hidden container for media elements to keep them in DOM for playback */}
+      <div className="hidden">
+         {/* Media elements are created dynamically in memory via JS, but we rely on refs */}
+      </div>
+
       <canvas 
-        ref={canvasRef} 
-        width={project.width} 
+        ref={canvasRef}
+        width={project.width}
         height={project.height}
-        className="block"
-        style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+        className="w-full h-full block"
       />
+      
       {!isMediaLoaded && project.clips.length > 0 && (videoRefs.current.size + audioRefs.current.size) === 0 && (
-         <div className="absolute inset-0 flex items-center justify-center text-white bg-black bg-opacity-50">
-           Loading resources...
-         </div>
+          <div className="absolute inset-0 flex items-center justify-center bg-gray-900/80 text-white z-10 pointer-events-none">
+              <div className="flex flex-col items-center">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mb-2"></div>
+                  <span className="text-sm">Loading resources...</span>
+              </div>
+          </div>
       )}
     </div>
   );
