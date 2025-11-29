@@ -1,11 +1,15 @@
 
 import { useState, useCallback, useEffect, useMemo, useRef, type FC, type ChangeEvent } from 'react';
-import { ProjectState, Clip, Track, LibraryClip } from './types';
-import { INITIAL_TRACKS, STOCK_CLIPS, PIXELS_PER_SECOND_DEFAULT, RESOLUTIONS } from './constants';
+import { ProjectState, Clip, LibraryClip } from './types';
+import { INITIAL_TRACKS, PIXELS_PER_SECOND_DEFAULT, RESOLUTIONS } from './constants';
 import Timeline from './components/Timeline';
 import Player from './components/Player';
 import Toolbar from './components/Toolbar';
 import ProjectManager from './components/ProjectManager';
+import ProjectSettings from './components/ProjectSettings';
+import ClipProperties from './components/ClipProperties';
+import MediaLibrary from './components/MediaLibrary';
+import ExportModals from './components/ExportModals';
 
 const App: FC = () => {
   const [mediaUrl, setMediaUrl] = useState('');
@@ -297,6 +301,55 @@ const App: FC = () => {
     }));
   };
 
+  const handleAddTextClip = () => {
+    // Robustly find or create the text track
+    setProject(p => {
+        let tracks = [...p.tracks];
+        let textTrack = tracks.find(t => t.type === 'text');
+        
+        if (!textTrack) {
+             const defaultTextTrack = INITIAL_TRACKS.find(t => t.type === 'text');
+             if (defaultTextTrack) {
+                 textTrack = defaultTextTrack;
+                 tracks.push(textTrack);
+             } else {
+                 // Fallback if constants are missing it for some reason
+                 return p; 
+             }
+        }
+
+        const newClip: Clip = {
+            id: crypto.randomUUID(),
+            name: "New Title",
+            url: "", 
+            duration: 5,
+            start: 0,
+            end: 5,
+            offset: p.currentTime,
+            track: textTrack.id,
+            type: 'text',
+            textContent: "Double click to edit",
+            fontSize: 60,
+            fontColor: "#ffffff",
+            x: p.width / 2,
+            y: p.height / 2,
+            fadeIn: 0,
+            fadeOut: 0
+        };
+        
+        const newEndTime = newClip.offset + newClip.duration;
+
+        return {
+            ...p,
+            tracks,
+            clips: [...p.clips, newClip],
+            duration: Math.max(p.duration, newEndTime + 10),
+            currentTime: newEndTime,
+            selectedClipId: newClip.id // Auto-select to edit
+        };
+    });
+  };
+
   const handleUpdateClip = (updatedClip: Clip) => {
     setProject(p => ({
       ...p,
@@ -491,13 +544,24 @@ const App: FC = () => {
     // If the project object is null or undefined (e.g. cancelled load), do nothing
     if (!loadedProject) return;
 
+    // Ensure tracks array exists
+    let tracks = Array.isArray(loadedProject.tracks) ? loadedProject.tracks : INITIAL_TRACKS;
+
+    // Migration: Ensure Text Track exists if loading old project
+    if (!tracks.find(t => t.type === 'text')) {
+        const defaultTextTrack = INITIAL_TRACKS.find(t => t.type === 'text');
+        if (defaultTextTrack) {
+            tracks = [...tracks, defaultTextTrack];
+        }
+    }
+
     // Sanitize and default missing fields to prevent crashes with old/malformed JSONs
     // Create a new object to ensure state update triggers
     const safeProject: ProjectState = {
         name: loadedProject.name || "Imported Project",
         library: Array.isArray(loadedProject.library) ? loadedProject.library : [],
         clips: Array.isArray(loadedProject.clips) ? loadedProject.clips : [],
-        tracks: Array.isArray(loadedProject.tracks) ? loadedProject.tracks : INITIAL_TRACKS,
+        tracks: tracks,
         duration: typeof loadedProject.duration === 'number' ? loadedProject.duration : 30,
         currentTime: 0,
         isPlaying: false,
@@ -551,203 +615,38 @@ const App: FC = () => {
         onSetOutPoint={handleSetOutPoint}
         onClearMarkers={handleClearMarkers}
         onToggleLoop={handleToggleLoop}
+        onAddText={handleAddTextClip}
       />
 
       <div className="flex-1 flex overflow-hidden relative">
         {/* Sidebar / Media Library */}
         <div className="w-64 bg-gray-900 border-r border-gray-800 p-4 flex flex-col overflow-y-auto custom-scrollbar">
            
-           {/* Project Settings */}
-           <div className="mb-6 border-b border-gray-800 pb-4">
-               <h2 className="text-sm font-semibold text-gray-400 uppercase mb-3">Project Settings</h2>
-               <div className="mb-3">
-                 <div className="text-[10px] text-gray-500 mb-1 block uppercase tracking-wider">Project Name</div>
-                 <div className="text-sm font-medium text-white">{project.name || "Untitled Project"}</div>
-               </div>
-               <div>
-                   <label className="text-[10px] text-gray-500 mb-1 block uppercase tracking-wider">Resolution</label>
-                   <select 
-                       className="w-full bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500"
-                       onChange={handleResolutionChange}
-                       value={RESOLUTIONS.find(r => r.width === project.width && r.height === project.height)?.name || ''}
-                   >
-                       {RESOLUTIONS.map(r => (
-                           <option key={r.name} value={r.name}>{r.name} ({r.width}x{r.height})</option>
-                       ))}
-                   </select>
-               </div>
-           </div>
+           <ProjectSettings 
+                project={project} 
+                onResolutionChange={handleResolutionChange} 
+           />
 
-           {/* Selected Clip Properties */}
-           {selectedClip && (
-               <div className="mb-6 border-b border-gray-800 pb-4 animate-in fade-in slide-in-from-left-2 duration-200">
-                   <h2 className="text-sm font-semibold text-blue-400 uppercase mb-3">Selected Clip</h2>
-                   
-                   <div className="mb-3">
-                       <label className="text-[10px] text-gray-500 mb-1 block">Clip Name</label>
-                       <input 
-                           type="text" 
-                           value={selectedClip.name}
-                           onChange={(e) => handleUpdateClip({...selectedClip, name: e.target.value})}
-                           onKeyDown={(e) => e.stopPropagation()}
-                           className="w-full bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1 focus:outline-none focus:border-blue-500"
-                       />
-                   </div>
-                   
-                   <div className="mb-3 border-t border-gray-700 pt-3">
-                        <label className="text-[10px] text-gray-500 mb-2 block uppercase tracking-wider">Transition (In)</label>
-                        <div className="flex space-x-2 mb-2">
-                             <button 
-                                onClick={() => handleApplyTransition('cut')}
-                                className="flex-1 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs py-1"
-                             >
-                                Cut (None)
-                             </button>
-                             <button 
-                                onClick={() => handleApplyTransition('dissolve')}
-                                className="flex-1 bg-blue-900/50 hover:bg-blue-800 border border-blue-800 rounded text-xs py-1 text-blue-200"
-                             >
-                                Cross Dissolve
-                             </button>
-                        </div>
-                        <div className="flex items-center space-x-2">
-                            <label className="text-[10px] text-gray-500">Duration:</label>
-                             <input 
-                               type="number" 
-                               min="0.1"
-                               max="5"
-                               step="0.1"
-                               value={transitionDuration}
-                               onChange={(e) => setTransitionDuration(Number(e.target.value))}
-                               className="w-16 bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1 focus:outline-none focus:border-blue-500"
-                           />
-                           <span className="text-[10px] text-gray-500">s</span>
-                        </div>
-                        <p className="text-[9px] text-gray-500 mt-1 italic">
-                            'Dissolve' overlaps clip with previous clip.
-                        </p>
-                   </div>
-                   
-                   <div className="grid grid-cols-2 gap-3 border-t border-gray-700 pt-3">
-                       <div>
-                           <label className="text-[10px] text-gray-500 mb-1 block">Fade In (s)</label>
-                           <input 
-                               type="number" 
-                               min="0"
-                               max="5"
-                               step="0.1"
-                               value={selectedClip.fadeIn || 0}
-                               onChange={(e) => handleUpdateClip({...selectedClip, fadeIn: Number(e.target.value)})}
-                               className="w-full bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1 focus:outline-none focus:border-blue-500"
-                           />
-                       </div>
-                       <div>
-                           <label className="text-[10px] text-gray-500 mb-1 block">Fade Out (s)</label>
-                           <input 
-                               type="number" 
-                               min="0"
-                               max="5"
-                               step="0.1"
-                               value={selectedClip.fadeOut || 0}
-                               onChange={(e) => handleUpdateClip({...selectedClip, fadeOut: Number(e.target.value)})}
-                               className="w-full bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1 focus:outline-none focus:border-blue-500"
-                           />
-                       </div>
-                   </div>
-               </div>
-           )}
+           <ClipProperties 
+                selectedClip={selectedClip}
+                onUpdateClip={handleUpdateClip}
+                transitionDuration={transitionDuration}
+                setTransitionDuration={setTransitionDuration}
+                onApplyTransition={handleApplyTransition}
+           />
 
-           <h2 className="text-sm font-semibold text-gray-400 uppercase mb-4">Media Library</h2>
-           
-           {/* Add Custom URL Section */}
-           <div className="mb-6">
-              <div className="text-[10px] text-gray-500 mb-1 uppercase tracking-wider">Add from URL</div>
-              
-              <div className="flex space-x-2 mb-2">
-                 <button 
-                    onClick={() => setMediaType('video')}
-                    className={`flex-1 text-[10px] py-1 rounded border ${mediaType === 'video' ? 'bg-blue-600 border-blue-600 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'}`}
-                 >
-                    Video
-                 </button>
-                 <button 
-                    onClick={() => setMediaType('audio')}
-                    className={`flex-1 text-[10px] py-1 rounded border ${mediaType === 'audio' ? 'bg-green-600 border-green-600 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'}`}
-                 >
-                    Audio
-                 </button>
-              </div>
-
-              <div className="flex flex-col space-y-2">
-                  <input 
-                      type="text" 
-                      placeholder="https://..."
-                      value={mediaUrl}
-                      onChange={(e) => setMediaUrl(e.target.value)}
-                      onKeyDown={(e) => e.stopPropagation()} // Stop propagation so spacebar doesn't trigger play
-                      className="w-full bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500 placeholder-gray-600"
-                  />
-                  <button 
-                      onClick={handleAddMedia}
-                      disabled={!mediaUrl}
-                      className={`w-full py-1.5 disabled:opacity-50 text-xs font-medium rounded text-white transition-colors ${mediaType === 'video' ? 'bg-blue-600/80 hover:bg-blue-500' : 'bg-green-600/80 hover:bg-green-500'}`}
-                  >
-                      Add {mediaType === 'video' ? 'Video' : 'Audio'} to Library
-                  </button>
-              </div>
-
-              {/* Upload Section */}
-              <div className="mt-4 pt-4 border-t border-gray-800">
-                <div className="text-[10px] text-gray-500 mb-2 uppercase tracking-wider">Upload Media</div>
-                <input 
-                    type="file" 
-                    ref={fileInputRef}
-                    className="hidden" 
-                    accept={mediaType === 'video' ? "video/*, .mp4, .mov, .webm, .mkv" : "audio/*, .mp3, .wav, .ogg, .m4a, .aac, .flac"}
-                    onChange={handleFileUpload}
-                />
-                <button 
-                    onClick={() => fileInputRef.current?.click()}
-                    className="w-full py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs text-gray-300 transition-colors flex items-center justify-center"
-                >
-                    <svg className="w-3 h-3 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
-                    Upload {mediaType === 'video' ? 'Video' : 'Audio'}
-                </button>
-                <div className="mt-1 text-[9px] text-gray-500 italic text-center">
-                    Note: Uploaded files are not saved permanently in projects.
-                </div>
-              </div>
-           </div>
-
-           <div className="text-[10px] text-gray-500 mb-2 uppercase tracking-wider">Clips</div>
-           {project.library.length === 0 ? (
-               <div className="text-xs text-gray-600 italic">No clips in library.</div>
-           ) : (
-             <div className="space-y-3 pb-4">
-               {project.library.map((clip, idx) => (
-                 <div key={idx} className="relative group p-3 bg-gray-800 rounded hover:bg-gray-700 transition cursor-pointer border border-transparent hover:border-gray-600" onClick={() => handleAddClip(idx)}>
-                    <div className="flex items-center justify-between mb-1">
-                        <div className="text-sm font-medium text-white truncate max-w-[110px]">{clip.name}</div>
-                        <span className={`text-[9px] px-1 rounded ${clip.type === 'video' ? 'bg-blue-900 text-blue-300' : 'bg-green-900 text-green-300'}`}>{clip.type === 'video' ? 'VID' : 'AUD'}</span>
-                    </div>
-                    <div className="text-xs text-gray-500">{clip.duration.toFixed(1)}s</div>
-                    <div className="mt-2 text-xs text-blue-400 opacity-0 group-hover:opacity-100 transition-opacity">Click to Add</div>
-                    
-                    {/* Delete Button */}
-                    <button 
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            handleDeleteFromLibrary(idx);
-                        }}
-                        className="absolute bottom-2 right-2 p-1.5 text-gray-500 hover:text-red-400"
-                        title="Remove from Library"
-                    >
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                    </button>
-                 </div>
-               ))}
-             </div>
-           )}
+           <MediaLibrary 
+                project={project}
+                mediaUrl={mediaUrl}
+                setMediaUrl={setMediaUrl}
+                mediaType={mediaType}
+                setMediaType={setMediaType}
+                onAddMedia={handleAddMedia}
+                fileInputRef={fileInputRef}
+                onFileUpload={handleFileUpload}
+                onAddClip={handleAddClip}
+                onDeleteFromLibrary={handleDeleteFromLibrary}
+           />
            
         </div>
 
@@ -764,6 +663,7 @@ const App: FC = () => {
                     onExportFinish={handleExportFinish}
                     width={playerDimensions.width}
                     height={playerDimensions.height}
+                    onClipUpdate={handleUpdateClip}
                 />
                 
                 {/* Export Overlay */}
@@ -806,89 +706,17 @@ const App: FC = () => {
             onLoadProject={handleLoadProject}
         />
 
-        {/* Export Configuration Modal */}
-        {showExportModal && (
-            <div className="absolute inset-0 z-[60] bg-black/70 flex items-center justify-center">
-                <div className="bg-gray-800 p-6 rounded-lg shadow-2xl w-96 border border-gray-700">
-                    <h3 className="text-lg font-bold mb-4">Export Video</h3>
-                    
-                    <div className="space-y-4 mb-6">
-                        <div>
-                            <label className="block text-xs text-gray-400 mb-1">Start Time (seconds)</label>
-                            <input 
-                                type="number" 
-                                value={exportSettings.start}
-                                onChange={(e) => setExportSettings(s => ({...s, start: Number(e.target.value)}))}
-                                onKeyDown={(e) => e.stopPropagation()} // Stop propagation
-                                className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none"
-                                min="0"
-                            />
-                        </div>
-                        <div>
-                            <label className="block text-xs text-gray-400 mb-1">End Time (seconds)</label>
-                            <input 
-                                type="number" 
-                                value={exportSettings.end}
-                                onChange={(e) => setExportSettings(s => ({...s, end: Number(e.target.value)}))}
-                                onKeyDown={(e) => e.stopPropagation()} // Stop propagation
-                                className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none"
-                                min="0"
-                            />
-                            <p className="text-[10px] text-gray-500 mt-1">Defaults to In/Out points if set, or end of last clip.</p>
-                        </div>
-                        <div className="pt-2 border-t border-gray-700">
-                            <p className="text-xs text-gray-400">Output Resolution: <span className="text-white">{project.width}x{project.height}</span></p>
-                        </div>
-                    </div>
-
-                    <div className="flex justify-end space-x-3">
-                        <button 
-                            onClick={() => setShowExportModal(false)}
-                            className="px-4 py-2 text-sm text-gray-300 hover:text-white"
-                        >
-                            Cancel
-                        </button>
-                        <button 
-                            onClick={startExport}
-                            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm font-medium"
-                        >
-                            Start Export
-                        </button>
-                    </div>
-                </div>
-            </div>
-        )}
-
-        {/* Download Ready Modal */}
-        {exportUrl && (
-            <div className="absolute inset-0 z-[70] bg-black/80 flex items-center justify-center">
-                <div className="bg-gray-800 p-6 rounded-lg shadow-2xl w-96 border border-gray-700 text-center">
-                    <div className="w-12 h-12 bg-green-500 rounded-full flex items-center justify-center mx-auto mb-4">
-                        <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" /></svg>
-                    </div>
-                    <h3 className="text-xl font-bold mb-2">Export Complete!</h3>
-                    <p className="text-gray-400 text-sm mb-6">Your video is ready to be downloaded.</p>
-                    
-                    <div className="flex flex-col space-y-3">
-                        <button 
-                            onClick={downloadExportedVideo}
-                            className="w-full px-4 py-3 bg-blue-600 hover:bg-blue-500 rounded text-sm font-bold text-white shadow-lg transition-transform active:scale-95"
-                        >
-                            Download Video
-                        </button>
-                        <button 
-                            onClick={() => {
-                                setExportUrl(null);
-                                URL.revokeObjectURL(exportUrl);
-                            }}
-                            className="w-full px-4 py-2 text-sm text-gray-400 hover:text-white"
-                        >
-                            Close
-                        </button>
-                    </div>
-                </div>
-            </div>
-        )}
+        <ExportModals 
+            showExportModal={showExportModal}
+            setShowExportModal={setShowExportModal}
+            exportSettings={exportSettings}
+            setExportSettings={setExportSettings}
+            startExport={startExport}
+            exportUrl={exportUrl}
+            downloadExportedVideo={downloadExportedVideo}
+            setExportUrl={setExportUrl}
+            project={project}
+        />
 
       </div>
     </div>

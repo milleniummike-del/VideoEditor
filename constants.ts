@@ -16,5 +16,5 @@ export const STOCK_CLIPS: { name: string; url: string; duration: number }[] = []
 export const INITIAL_TRACKS = [
   { id: 0, name: "Video Track 1", type: "video" as const, isMuted: false, isLocked: false },
   { id: 1, name: "Audio Track 1", type: "audio" as const, isMuted: false, isLocked: false },
-  { id: 2, name: "Video Track 2", type: "video" as const, isMuted: false, isLocked: false },
+  { id: 2, name: "Text Track", type: "text" as const, isMuted: false, isLocked: false },
 ];

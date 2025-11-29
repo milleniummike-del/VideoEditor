@@ -15,6 +15,7 @@ interface ToolbarProps {
   onSetOutPoint: () => void;
   onClearMarkers: () => void;
   onToggleLoop: () => void;
+  onAddText: () => void;
 }
 
 const Toolbar: FC<ToolbarProps> = ({ 
@@ -28,7 +29,8 @@ const Toolbar: FC<ToolbarProps> = ({
   onSetInPoint,
   onSetOutPoint,
   onClearMarkers,
-  onToggleLoop
+  onToggleLoop,
+  onAddText
 }) => {
   return (
     <div className="h-14 bg-gray-800 border-b border-gray-700 flex items-center px-4 justify-between">
@@ -88,9 +90,19 @@ const Toolbar: FC<ToolbarProps> = ({
         <div className="h-6 w-px bg-gray-600 mx-2" />
 
         <button 
+            onClick={onAddText}
+            disabled={isExporting}
+            title="Add Title"
+            className="flex items-center px-3 py-1.5 bg-gray-700 hover:bg-purple-900/50 text-purple-200 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed border border-purple-500/30"
+        >
+            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" /></svg>
+            Title
+        </button>
+
+        <button 
             onClick={onSplit}
             disabled={!project.selectedClipId || isExporting}
-            className="flex items-center px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed ml-2"
         >
             <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-2.879 2.879M12 12L9.121 9.121m0 5.758a3 3 0 10-4.243 4.243 3 3 0 004.243-4.243zm8.486-8.486a3 3 0 10-4.243 4.243 3 3 0 004.243-4.243z" /></svg>
             Split
@@ -99,7 +111,7 @@ const Toolbar: FC<ToolbarProps> = ({
         <button 
             onClick={onDelete}
             disabled={!project.selectedClipId || isExporting}
-            className="flex items-center px-3 py-1.5 bg-gray-700 hover:bg-red-900/50 text-red-200 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center px-3 py-1.5 bg-gray-700 hover:bg-red-900/50 text-red-200 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed ml-2"
         >
             <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
             Delete

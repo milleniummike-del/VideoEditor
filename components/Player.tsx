@@ -1,5 +1,5 @@
 
-import { useRef, useEffect, useState, useCallback, type FC } from 'react';
+import { useRef, useEffect, useState, useCallback, useMemo, type FC } from 'react';
 import { Clip, ProjectState } from '../types';
 
 interface PlayerProps {
@@ -11,6 +11,7 @@ interface PlayerProps {
   onExportFinish?: (url: string | null, mimeType?: string) => void;
   width?: number; // Display Width
   height?: number; // Display Height
+  onClipUpdate?: (clip: Clip) => void;
 }
 
 const Player: FC<PlayerProps> = ({ 
@@ -20,7 +21,8 @@ const Player: FC<PlayerProps> = ({
   exportEndTime,
   onExportFinish,
   width = 800, 
-  height = 450 
+  height = 450,
+  onClipUpdate
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
@@ -48,6 +50,10 @@ const Player: FC<PlayerProps> = ({
   const recordedChunksRef = useRef<Blob[]>([]);
   const isInternalExporting = useRef(false); // Drives the loop during export without affecting global isPlaying state
   const isStoppingRef = useRef(false); // Prevents race conditions during stop
+
+  // Interaction Refs (Drag Overlay)
+  const [draggingTextId, setDraggingTextId] = useState<string | null>(null);
+  const dragStartRef = useRef<{x: number, y: number, originalX: number, originalY: number} | null>(null);
 
   // Initialize Audio Context
   useEffect(() => {
@@ -219,6 +225,11 @@ const Player: FC<PlayerProps> = ({
     }
   }, [project.isPlaying]);
 
+  // Calculate content duration for implicit looping
+  const contentDuration = useMemo(() => {
+      return project.clips.reduce((max, c) => Math.max(max, c.offset + (c.end - c.start)), 0);
+  }, [project.clips]);
+
   // Main Render Loop Function (Defined before use)
   const renderFrameLogic = useCallback((currentTime: number) => {
     const canvas = canvasRef.current;
@@ -244,10 +255,11 @@ const Player: FC<PlayerProps> = ({
         let mediaEl: HTMLMediaElement | undefined;
         if (clip.type === 'video') {
             mediaEl = videoRefs.current.get(clip.id);
-        } else {
+        } else if (clip.type === 'audio') {
             mediaEl = audioRefs.current.get(clip.id);
         }
 
+        // Logic for video/audio clips
         if (mediaEl && (mediaEl.readyState >= 2 || clip.type === 'audio')) { 
              const clipTime = (currentTime - clip.offset) + clip.start;
              
@@ -275,7 +287,7 @@ const Player: FC<PlayerProps> = ({
                  mediaEl.pause();
              }
 
-             // Handle Fading (Audio Volume)
+             // Handle Fading (Audio Volume & Visual Opacity calculation)
              const gainNode = gainNodesRef.current.get(clip.id);
              let alpha = 1;
              
@@ -294,6 +306,18 @@ const Player: FC<PlayerProps> = ({
              
              // Store alpha for video drawing
              (clip as any)._renderAlpha = alpha; 
+        } else if (clip.type === 'text') {
+             // Logic for text clips (Just fade calculation)
+             let alpha = 1;
+             const relativeTime = currentTime - clip.offset;
+             const remainingTime = (clip.offset + (clip.end - clip.start)) - currentTime;
+
+             if (clip.fadeIn && clip.fadeIn > 0 && relativeTime < clip.fadeIn) {
+                 alpha = relativeTime / clip.fadeIn;
+             } else if (clip.fadeOut && clip.fadeOut > 0 && remainingTime < clip.fadeOut) {
+                 alpha = remainingTime / clip.fadeOut;
+             }
+             (clip as any)._renderAlpha = alpha;
         }
     });
 
@@ -334,6 +358,27 @@ const Player: FC<PlayerProps> = ({
                 
                 ctx.globalAlpha = 1.0; // Reset
             }
+        });
+
+    // 3. Draw Text Clips (Layered on top)
+    activeClips
+        .filter(c => c.type === 'text')
+        .forEach(clip => {
+            const alpha = (clip as any)._renderAlpha !== undefined ? (clip as any)._renderAlpha : 1;
+            ctx.globalAlpha = alpha;
+            
+            ctx.font = `${clip.fontSize || 60}px sans-serif`;
+            ctx.fillStyle = clip.fontColor || '#ffffff';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            
+            // X and Y defaults (Center if not set)
+            const x = clip.x !== undefined ? clip.x : canvasWidth / 2;
+            const y = clip.y !== undefined ? clip.y : canvasHeight / 2;
+            
+            ctx.fillText(clip.textContent || "", x, y);
+            
+            ctx.globalAlpha = 1.0;
         });
 
   }, [project.clips, project.width, project.height, project.isPlaying]);
@@ -493,9 +538,17 @@ const Player: FC<PlayerProps> = ({
 
             // LOOP LOGIC
             // If looping is enabled and we have valid in/out points
-            if (project.isLooping && project.inPoint !== null && project.outPoint !== null && !isExportingActive) {
-                if (internalTimeRef.current >= project.outPoint) {
-                    internalTimeRef.current = project.inPoint;
+            if (project.isLooping && !isExportingActive) {
+                if (project.inPoint !== null && project.outPoint !== null) {
+                    // Explicit Loop: In to Out
+                    if (internalTimeRef.current >= project.outPoint) {
+                        internalTimeRef.current = project.inPoint;
+                    }
+                } else if (contentDuration > 0) {
+                     // Implicit loop: Whole timeline content
+                     if (internalTimeRef.current >= contentDuration) {
+                         internalTimeRef.current = 0;
+                     }
                 }
             }
             
@@ -532,7 +585,7 @@ const Player: FC<PlayerProps> = ({
     renderFrameLogic(internalTimeRef.current);
 
     requestRef.current = requestAnimationFrame(renderLoop);
-  }, [project.isPlaying, project.isLooping, project.inPoint, project.outPoint, isExporting, exportEndTime, onTimeUpdate, renderFrameLogic, onExportFinish]);
+  }, [project.isPlaying, project.isLooping, project.inPoint, project.outPoint, isExporting, exportEndTime, onTimeUpdate, renderFrameLogic, onExportFinish, contentDuration]);
 
   // Start/Stop Loop
   useEffect(() => {
@@ -542,11 +595,115 @@ const Player: FC<PlayerProps> = ({
     };
   }, [renderLoop]);
 
+  // -- INTERACTIVE TEXT OVERLAY LOGIC --
+  const handleTextMouseDown = (e: React.MouseEvent, clip: Clip) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (!onClipUpdate) return;
+    
+    setDraggingTextId(clip.id);
+    dragStartRef.current = {
+        x: e.clientX,
+        y: e.clientY,
+        originalX: clip.x !== undefined ? clip.x : project.width / 2,
+        originalY: clip.y !== undefined ? clip.y : project.height / 2
+    };
+  };
+
+  const handleTextTouchStart = (e: React.TouchEvent, clip: Clip) => {
+    e.stopPropagation();
+    if (!onClipUpdate) return;
+    
+    const touch = e.touches[0];
+    setDraggingTextId(clip.id);
+    dragStartRef.current = {
+        x: touch.clientX,
+        y: touch.clientY,
+        originalX: clip.x !== undefined ? clip.x : project.width / 2,
+        originalY: clip.y !== undefined ? clip.y : project.height / 2
+    };
+  };
+
+  useEffect(() => {
+    const handleMove = (e: MouseEvent | TouchEvent) => {
+        if (!draggingTextId || !dragStartRef.current || !onClipUpdate) return;
+        
+        let clientX, clientY;
+        if ('touches' in e) {
+            clientX = e.touches[0].clientX;
+            clientY = e.touches[0].clientY;
+            e.preventDefault(); // Stop scrolling on touch
+        } else {
+            clientX = (e as MouseEvent).clientX;
+            clientY = (e as MouseEvent).clientY;
+        }
+
+        const dx = clientX - dragStartRef.current.x;
+        const dy = clientY - dragStartRef.current.y;
+        
+        // Calculate Scale Factor (Resolution vs Display Size)
+        const scale = project.width / width; // Assuming uniform scaling due to Aspect Ratio maintenance in App.tsx
+        
+        const newX = dragStartRef.current.originalX + (dx * scale);
+        const newY = dragStartRef.current.originalY + (dy * scale);
+        
+        const clip = project.clips.find(c => c.id === draggingTextId);
+        if (clip) {
+             onClipUpdate({ ...clip, x: newX, y: newY });
+        }
+    };
+
+    const handleUp = () => {
+        setDraggingTextId(null);
+        dragStartRef.current = null;
+    };
+
+    if (draggingTextId) {
+        window.addEventListener('mousemove', handleMove);
+        window.addEventListener('mouseup', handleUp);
+        window.addEventListener('touchmove', handleMove, { passive: false });
+        window.addEventListener('touchend', handleUp);
+    }
+    return () => {
+        window.removeEventListener('mousemove', handleMove);
+        window.removeEventListener('mouseup', handleUp);
+        window.removeEventListener('touchmove', handleMove);
+        window.removeEventListener('touchend', handleUp);
+    };
+  }, [draggingTextId, width, project.width, onClipUpdate, project.clips]);
+
+
   return (
     <div className="relative shadow-2xl bg-black" style={{ width, height }}>
-      {/* Hidden container for media elements to keep them in DOM for playback */}
-      <div className="hidden">
-         {/* Media elements are created dynamically in memory via JS, but we rely on refs */}
+      {/* Interactive Overlay Layer */}
+      <div className="absolute inset-0 pointer-events-none z-10 overflow-hidden">
+        {project.clips
+            .filter(c => c.type === 'text' && 
+                         project.currentTime >= c.offset && 
+                         project.currentTime < c.offset + (c.end - c.start) &&
+                         project.selectedClipId === c.id
+            )
+            .map(clip => {
+                 // Convert Clip Coords to Screen Coords
+                 const scale = width / project.width;
+                 const screenX = (clip.x !== undefined ? clip.x : project.width / 2) * scale;
+                 const screenY = (clip.y !== undefined ? clip.y : project.height / 2) * scale;
+                 
+                 return (
+                     <div 
+                        key={clip.id}
+                        className="absolute w-6 h-6 -ml-3 -mt-3 border-2 border-blue-500 bg-blue-500/20 rounded-full cursor-move pointer-events-auto"
+                        style={{ left: screenX, top: screenY }}
+                        onMouseDown={(e) => handleTextMouseDown(e, clip)}
+                        onTouchStart={(e) => handleTextTouchStart(e, clip)}
+                     >
+                         <div className="absolute -top-6 left-1/2 -translate-x-1/2 text-[10px] bg-blue-500 text-white px-1 rounded whitespace-nowrap">
+                             Drag
+                         </div>
+                     </div>
+                 );
+            })
+        }
       </div>
 
       <canvas 

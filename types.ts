@@ -15,15 +15,21 @@ export interface Clip {
   end: number;      // End time within source
   offset: number;   // Start time on timeline
   track: number;    // Track index
-  type: 'video' | 'audio';
+  type: 'video' | 'audio' | 'text';
   fadeIn?: number;  // Duration in seconds
   fadeOut?: number; // Duration in seconds
+  // Text specific properties
+  textContent?: string;
+  fontSize?: number;
+  fontColor?: string;
+  x?: number;
+  y?: number;
 }
 
 export interface Track {
   id: number;
   name: string;
-  type: 'video' | 'audio';
+  type: 'video' | 'audio' | 'text';
   isMuted: boolean;
   isLocked: boolean;
 }

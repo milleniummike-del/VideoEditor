@@ -251,7 +251,11 @@ const Timeline: FC<TimelineProps> = ({ project, onSeek, onClipUpdate, onClipSele
                   else if (dragState.interactionType === 'trim-end') {
                       let newEnd = dragState.originalEnd + deltaTime;
                       
-                      if (newEnd > clip.duration) newEnd = clip.duration; 
+                      // For text clips, max duration is not strictly bound by "source", but let's allow arbitrary length
+                      // For video/audio, bound by duration
+                      const maxDuration = clip.type === 'text' ? 3600 : clip.duration;
+
+                      if (newEnd > maxDuration) newEnd = maxDuration; 
                       if (newEnd < clip.start + 0.1) newEnd = clip.start + 0.1;
 
                       updatedClip.end = newEnd;
@@ -298,6 +302,14 @@ const Timeline: FC<TimelineProps> = ({ project, onSeek, onClipUpdate, onClipSele
       const newTime = getTimelineTime(e.touches[0].clientX);
       onSeek(newTime);
       setIsDraggingPlayhead(true);
+  };
+  
+  // Helper for background colors
+  const getClipColor = (type: string, isSelected: boolean) => {
+      if (type === 'video') return isSelected ? 'bg-blue-800' : 'bg-blue-900/80 hover:bg-blue-800';
+      if (type === 'audio') return isSelected ? 'bg-green-800' : 'bg-green-900/80 hover:bg-green-800';
+      if (type === 'text') return isSelected ? 'bg-purple-800' : 'bg-purple-900/80 hover:bg-purple-800';
+      return 'bg-gray-700';
   };
 
   return (
@@ -406,13 +418,14 @@ const Timeline: FC<TimelineProps> = ({ project, onSeek, onClipUpdate, onClipSele
                             const width = (clip.end - clip.start) * pixelsPerSecond;
                             const left = clip.offset * pixelsPerSecond;
                             const isSelected = project.selectedClipId === clip.id;
-                            
+                            const bgClass = getClipColor(clip.type, isSelected);
+
                             return (
                                 <div
                                     key={clip.id}
                                     className={`absolute top-6 h-12 rounded cursor-pointer overflow-visible border transition-colors group
                                         ${isSelected ? 'border-yellow-400 ring-1 ring-yellow-400 z-10' : 'border-gray-700'}
-                                        ${clip.type === 'video' ? 'bg-blue-900/80 hover:bg-blue-800' : 'bg-green-900/80 hover:bg-green-800'}
+                                        ${bgClass}
                                     `}
                                     style={{ left, width }}
                                     onMouseDown={(e) => handleClipMouseDown(e, clip)}
@@ -422,7 +435,7 @@ const Timeline: FC<TimelineProps> = ({ project, onSeek, onClipUpdate, onClipSele
                                 >
                                     {/* Clip Info */}
                                     <div className="px-2 py-1 truncate text-xs text-white/90 select-none pointer-events-none overflow-hidden">
-                                        {clip.name}
+                                        {clip.type === 'text' ? (clip.textContent || clip.name) : clip.name}
                                     </div>
                                     
                                     {/* Trim Handles (Only visible on hover or selection) */}
