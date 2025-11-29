@@ -1,5 +1,4 @@
-
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import { useRef, useEffect, useState, useCallback, type FC } from 'react';
 import { Clip, ProjectState } from '../types';
 
 interface PlayerProps {
@@ -8,12 +7,12 @@ interface PlayerProps {
   onDurationChange: (duration: number) => void;
   isExporting?: boolean;
   exportEndTime?: number;
-  onExportFinish?: () => void;
+  onExportFinish?: (url: string | null, mimeType?: string) => void;
   width?: number; // Display Width
   height?: number; // Display Height
 }
 
-const Player: React.FC<PlayerProps> = ({ 
+const Player: FC<PlayerProps> = ({ 
   project, 
   onTimeUpdate, 
   isExporting = false,
@@ -39,11 +38,15 @@ const Player: React.FC<PlayerProps> = ({
   
   // Timing refs for smooth playback
   const lastTimeRef = useRef<number | null>(null);
+  // Independent time tracker to decouple render loop from React state updates
+  const internalTimeRef = useRef<number>(0); 
   const playbackSpeedRef = useRef<number>(1);
   
   // Export refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
+  const isInternalExporting = useRef(false); // Drives the loop during export without affecting global isPlaying state
+  const isStoppingRef = useRef(false); // Prevents race conditions during stop
 
   // Initialize Audio Context
   useEffect(() => {
@@ -53,7 +56,37 @@ const Player: React.FC<PlayerProps> = ({
         audioContextRef.current = ctx;
         audioDestinationRef.current = ctx.createMediaStreamDestination();
     }
+
+    // iOS Audio Unlock: Resume context on first user interaction
+    const unlockAudio = () => {
+        if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+            audioContextRef.current.resume().then(() => {
+                console.log("AudioContext resumed by user gesture");
+            }).catch(e => console.warn("Failed to resume AudioContext", e));
+        }
+        // Remove listeners once triggered
+        window.removeEventListener('touchstart', unlockAudio);
+        window.removeEventListener('click', unlockAudio);
+        window.removeEventListener('keydown', unlockAudio);
+    };
+
+    window.addEventListener('touchstart', unlockAudio, { passive: true });
+    window.addEventListener('click', unlockAudio);
+    window.addEventListener('keydown', unlockAudio);
+
+    return () => {
+        window.removeEventListener('touchstart', unlockAudio);
+        window.removeEventListener('click', unlockAudio);
+        window.removeEventListener('keydown', unlockAudio);
+    };
   }, []);
+
+  // Sync internal time with project time when NOT playing/exporting (e.g. scrubbing)
+  useEffect(() => {
+    if (!project.isPlaying && !isInternalExporting.current) {
+        internalTimeRef.current = project.currentTime;
+    }
+  }, [project.currentTime, project.isPlaying]);
 
   // Initialize video and audio elements for all clips
   useEffect(() => {
@@ -109,6 +142,7 @@ const Player: React.FC<PlayerProps> = ({
             video.src = clip.url;
             video.preload = "auto";
             video.muted = false; // We use WebAudio to capture it
+            video.playsInline = true; // Critical for iOS
             
             video.onloadedmetadata = () => {
                 setIsMediaLoaded(prev => !prev);
@@ -177,75 +211,15 @@ const Player: React.FC<PlayerProps> = ({
     });
   }, [project.clips]);
 
-  // Handle Play/Pause Audio Context state
+  // Handle Play/Pause Audio Context state for normal playback
   useEffect(() => {
     if (project.isPlaying && audioContextRef.current?.state === 'suspended') {
         audioContextRef.current.resume();
     }
   }, [project.isPlaying]);
 
-  // Export Logic
-  useEffect(() => {
-    if (isExporting && canvasRef.current && !mediaRecorderRef.current && audioDestinationRef.current) {
-        // Start Recording
-        try {
-            const canvasStream = canvasRef.current.captureStream(60); // Video tracks
-            const audioStream = audioDestinationRef.current.stream; // Audio tracks
-            
-            // Combine tracks
-            const combinedTracks = [
-                ...canvasStream.getVideoTracks(),
-                ...audioStream.getAudioTracks()
-            ];
-            const combinedStream = new MediaStream(combinedTracks);
-
-            const recorder = new MediaRecorder(combinedStream, { 
-                mimeType: 'video/webm;codecs=vp9,opus' 
-            });
-
-            recorder.ondataavailable = (e) => {
-                if (e.data.size > 0) {
-                    recordedChunksRef.current.push(e.data);
-                }
-            };
-
-            recorder.onstop = () => {
-                const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.style.display = 'none';
-                a.href = url;
-                a.download = `lumina_export_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.webm`;
-                document.body.appendChild(a);
-                a.click();
-                setTimeout(() => {
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                }, 100);
-                
-                recordedChunksRef.current = [];
-                if (onExportFinish) onExportFinish();
-            };
-
-            recorder.start();
-            mediaRecorderRef.current = recorder;
-            console.log("Recording started...");
-        } catch (e) {
-            console.error("Export failed to start:", e);
-            if (onExportFinish) onExportFinish();
-        }
-    } else if (!isExporting && mediaRecorderRef.current) {
-        // Stop manually if cancelled
-        if (mediaRecorderRef.current.state !== 'inactive') {
-            mediaRecorderRef.current.stop();
-        }
-        mediaRecorderRef.current = null;
-    }
-  }, [isExporting, onExportFinish]);
-
-
-  // Main Render Loop
-  const renderFrame = useCallback(() => {
+  // Main Render Loop Function (Defined before use)
+  const renderFrameLogic = useCallback((currentTime: number) => {
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext('2d');
     if (!canvas || !ctx) return;
@@ -253,39 +227,6 @@ const Player: React.FC<PlayerProps> = ({
     // Use Project Resolution
     const canvasWidth = project.width;
     const canvasHeight = project.height;
-
-    // Time Calculation
-    let currentTime = project.currentTime;
-    
-    if (project.isPlaying) {
-        if (lastTimeRef.current === null) {
-            lastTimeRef.current = performance.now();
-        } else {
-            const now = performance.now();
-            const dt = (now - lastTimeRef.current) / 1000;
-            lastTimeRef.current = now;
-            
-            // Advance time
-            currentTime += dt * playbackSpeedRef.current;
-            
-            // Notify parent of time update
-            onTimeUpdate(currentTime);
-        }
-    } else {
-        lastTimeRef.current = null;
-    }
-
-    // Stop Export check
-    const effectiveEndTime = isExporting && exportEndTime !== undefined ? exportEndTime : project.duration;
-    if (isExporting && currentTime >= effectiveEndTime) {
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-            mediaRecorderRef.current.stop();
-            mediaRecorderRef.current = null;
-        }
-        // Ensure we don't loop or continue
-        onTimeUpdate(effectiveEndTime);
-        return; 
-    }
 
     // Clear canvas
     ctx.fillStyle = '#000';
@@ -309,15 +250,22 @@ const Player: React.FC<PlayerProps> = ({
         if (mediaEl && (mediaEl.readyState >= 2 || clip.type === 'audio')) { 
              const clipTime = (currentTime - clip.offset) + clip.start;
              
-             // Sync Check
-             if (Math.abs(mediaEl.currentTime - clipTime) > 0.25 || !project.isPlaying) {
+             // Sync Check - Only sync if playing or exporting
+             const isRunning = project.isPlaying || isInternalExporting.current;
+             
+             if (isRunning && Math.abs(mediaEl.currentTime - clipTime) > 0.25) {
+                 mediaEl.currentTime = clipTime;
+             } else if (!isRunning) {
+                 // Scrubbing
                  mediaEl.currentTime = clipTime;
              }
 
              // Play/Pause
-             if (project.isPlaying && mediaEl.paused) {
-                 mediaEl.play().catch(e => {}); // Ignore play interruptions
-             } else if (!project.isPlaying && !mediaEl.paused) {
+             if (isRunning && mediaEl.paused) {
+                 mediaEl.play().catch(e => {
+                     // Auto-play policy error or interrupt
+                 }); 
+             } else if (!isRunning && !mediaEl.paused) {
                  mediaEl.pause();
              }
 
@@ -340,7 +288,6 @@ const Player: React.FC<PlayerProps> = ({
              }
              
              if (gainNode) {
-                 // Ensure mute logic is respected if we had track mute, but for now just fade
                  gainNode.gain.value = alpha; 
              }
              
@@ -388,16 +335,203 @@ const Player: React.FC<PlayerProps> = ({
             }
         });
 
-    requestRef.current = requestAnimationFrame(renderFrame);
-  }, [project.clips, project.currentTime, project.isPlaying, project.width, project.height, onTimeUpdate, isExporting, exportEndTime]);
+  }, [project.clips, project.width, project.height, project.isPlaying]);
+
+
+  // Export Logic
+  useEffect(() => {
+    const initExport = async () => {
+        // If export requested AND not already recording
+        if (isExporting && canvasRef.current && !mediaRecorderRef.current && audioDestinationRef.current) {
+            
+            console.log("Initializing Export...");
+            isStoppingRef.current = false;
+
+            // 1. Ensure Audio is Ready
+            if (audioContextRef.current?.state === 'suspended') {
+                try {
+                    await audioContextRef.current.resume();
+                } catch(e) {
+                    console.error("Failed to resume audio for export", e);
+                }
+            }
+
+            try {
+                // Initialize internal time to start point for clean export loop
+                internalTimeRef.current = project.currentTime; 
+                
+                // WARM UP: Render the first frame to ensure the canvas isn't black when recording starts
+                renderFrameLogic(internalTimeRef.current);
+                
+                // 2. Prepare Stream
+                // Use 30fps for better stability on mobile/tablet exports
+                const canvasStream = canvasRef.current.captureStream(30); 
+                const combinedTracks = [...canvasStream.getVideoTracks()];
+
+                // Only add audio track if we actually have audio clips or video with audio
+                const hasAudioContent = project.clips.some(c => c.type === 'audio' || c.type === 'video');
+                
+                if (hasAudioContent) {
+                    const audioTracks = audioDestinationRef.current.stream.getAudioTracks();
+                    if (audioTracks.length > 0) {
+                        combinedTracks.push(audioTracks[0]);
+                    }
+                }
+                
+                const combinedStream = new MediaStream(combinedTracks);
+
+                // 3. Select Best Supported MIME Type
+                // Priorities: Simple MP4 -> Specific MP4 -> WebM
+                const optionsToTry = [
+                    'video/mp4', // Modern browsers often default to H264/AAC with this
+                    'video/mp4;codecs=h264,aac',
+                    'video/webm;codecs=h264',
+                    'video/webm'
+                ];
+
+                let recorder: MediaRecorder | null = null;
+                let selectedMimeType = '';
+
+                for (const mime of optionsToTry) {
+                    if (MediaRecorder.isTypeSupported(mime)) {
+                        try {
+                            recorder = new MediaRecorder(combinedStream, { mimeType: mime });
+                            selectedMimeType = mime;
+                            console.log(`Successfully created MediaRecorder with: ${mime}`);
+                            break;
+                        } catch (e) {
+                            console.warn(`Failed to init MediaRecorder with ${mime}`, e);
+                        }
+                    }
+                }
+
+                if (!recorder) {
+                    // Fallback to default
+                    try {
+                        recorder = new MediaRecorder(combinedStream);
+                        selectedMimeType = recorder.mimeType;
+                        console.log(`Fallback MediaRecorder created. Default Mime: ${selectedMimeType}`);
+                    } catch (e) {
+                        throw new Error("Browser does not support MediaRecorder creation.");
+                    }
+                }
+
+                // 4. Setup Recorder Events
+                recordedChunksRef.current = [];
+
+                recorder.ondataavailable = (e) => {
+                    if (e.data && e.data.size > 0) {
+                        recordedChunksRef.current.push(e.data);
+                    }
+                };
+
+                recorder.onstop = () => {
+                    console.log("Export Finished. Chunks:", recordedChunksRef.current.length);
+                    const blob = new Blob(recordedChunksRef.current, { type: selectedMimeType });
+                    
+                    isInternalExporting.current = false; // Stop internal loop
+
+                    if (blob.size === 0) {
+                        console.error("Recorded blob is empty");
+                        alert("Export failed: Video data is empty. The recording duration might have been too short or the format is unsupported on this device.");
+                        if (onExportFinish) onExportFinish(null);
+                    } else {
+                        const url = URL.createObjectURL(blob);
+                        if (onExportFinish) onExportFinish(url, selectedMimeType);
+                    }
+                    
+                    recordedChunksRef.current = [];
+                    mediaRecorderRef.current = null; // Clear ref
+                };
+
+                // 5. Start Recording & Playback
+                // Use default start() without timeslice to let browser manage atoms for MP4
+                recorder.start(); 
+                mediaRecorderRef.current = recorder;
+                
+                // Start the internal export loop
+                lastTimeRef.current = performance.now();
+                isInternalExporting.current = true; 
+
+            } catch (e) {
+                console.error("Export failed to start:", e);
+                alert("Export initialization failed. Please try again.");
+                if (onExportFinish) onExportFinish(null);
+            }
+        } else if (!isExporting && mediaRecorderRef.current) {
+            // Stop manually if cancelled from outside
+            if (mediaRecorderRef.current.state !== 'inactive') {
+                mediaRecorderRef.current.stop();
+            }
+            mediaRecorderRef.current = null;
+            isInternalExporting.current = false;
+        }
+    };
+
+    initExport();
+  }, [isExporting, onExportFinish, project.clips, project.currentTime]); // Depend on start time
+
+
+  // Animation Loop
+  const renderLoop = useCallback(() => {
+    // Determine Logic State (Normal Playback vs Export Playback)
+    const isPlayingRealtime = project.isPlaying;
+    const isExportingActive = isInternalExporting.current;
+
+    // We only update time if we are actually "playing" or "exporting"
+    if (isPlayingRealtime || isExportingActive) {
+        if (lastTimeRef.current === null) {
+            lastTimeRef.current = performance.now();
+        } else {
+            const now = performance.now();
+            const dt = (now - lastTimeRef.current) / 1000;
+            lastTimeRef.current = now;
+            
+            // Advance internal time reference
+            internalTimeRef.current += dt * playbackSpeedRef.current;
+            
+            // Sync Parent UI (Note: this is async and won't affect next frame calculation which uses internalTimeRef)
+            onTimeUpdate(internalTimeRef.current);
+        }
+    } else {
+        lastTimeRef.current = null;
+    }
+
+    // Stop Export check
+    const effectiveEndTime = isExporting && exportEndTime !== undefined ? exportEndTime : project.duration;
+    if (isExportingActive && internalTimeRef.current >= effectiveEndTime) {
+        // Delayed Stop Logic to ensure last frames are captured
+        if (!isStoppingRef.current) {
+             isStoppingRef.current = true;
+             console.log("Export duration reached. Stopping in 500ms...");
+             
+             // Continue rendering for 500ms to allow recorder to catch up
+             setTimeout(() => {
+                 if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+                    mediaRecorderRef.current.stop();
+                    // State cleanup happens in onstop event
+                } else {
+                    // If something weird happened and state is already inactive
+                    isInternalExporting.current = false;
+                    if (onExportFinish) onExportFinish(null);
+                }
+             }, 500);
+        }
+    }
+
+    // Call the logic to draw
+    renderFrameLogic(internalTimeRef.current);
+
+    requestRef.current = requestAnimationFrame(renderLoop);
+  }, [project.isPlaying, isExporting, exportEndTime, onTimeUpdate, renderFrameLogic, onExportFinish]);
 
   // Start/Stop Loop
   useEffect(() => {
-    requestRef.current = requestAnimationFrame(renderFrame);
+    requestRef.current = requestAnimationFrame(renderLoop);
     return () => {
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
     };
-  }, [renderFrame]);
+  }, [renderLoop]);
 
   return (
     <div className="relative shadow-2xl bg-black" style={{ width, height }}>

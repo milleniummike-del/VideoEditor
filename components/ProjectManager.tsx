@@ -1,5 +1,4 @@
-
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, type FC, type ChangeEvent } from 'react';
 import { ProjectState } from '../types';
 
 interface ProjectManagerProps {
@@ -11,7 +10,7 @@ interface ProjectManagerProps {
 
 const STORAGE_KEY = 'lumina_saved_projects';
 
-const ProjectManager: React.FC<ProjectManagerProps> = ({ 
+const ProjectManager: FC<ProjectManagerProps> = ({ 
   isOpen, 
   onClose, 
   currentProject, 
@@ -123,7 +122,7 @@ const ProjectManager: React.FC<ProjectManagerProps> = ({
       }
   };
 
-  const handleImportJSON = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImportJSON = (e: ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
 

@@ -1,5 +1,4 @@
-
-import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef, type FC, type ChangeEvent } from 'react';
 import { ProjectState, Clip, Track, LibraryClip } from './types';
 import { INITIAL_TRACKS, STOCK_CLIPS, PIXELS_PER_SECOND_DEFAULT, RESOLUTIONS } from './constants';
 import Timeline from './components/Timeline';
@@ -7,7 +6,7 @@ import Player from './components/Player';
 import Toolbar from './components/Toolbar';
 import ProjectManager from './components/ProjectManager';
 
-const App: React.FC = () => {
+const App: FC = () => {
   const [mediaUrl, setMediaUrl] = useState('');
   const [mediaType, setMediaType] = useState<'video' | 'audio'>('video');
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -43,6 +42,8 @@ const App: React.FC = () => {
   const [isExporting, setIsExporting] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportSettings, setExportSettings] = useState({ start: 0, end: 0 });
+  const [exportUrl, setExportUrl] = useState<string | null>(null);
+  const [exportMimeType, setExportMimeType] = useState<string>('');
 
   // Project Manager State
   const [showProjectManager, setShowProjectManager] = useState(false);
@@ -89,12 +90,32 @@ const App: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleTogglePlay]);
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     const objectUrl = URL.createObjectURL(file);
-    const type = file.type.startsWith('audio/') ? 'audio' : 'video';
+    
+    // Robust Type Detection
+    // 1. Check mime type
+    // 2. Fallback to extension
+    let detectedType: 'video' | 'audio' = 'video';
+    
+    if (file.type.startsWith('audio/')) {
+        detectedType = 'audio';
+    } else if (file.type.startsWith('video/')) {
+        detectedType = 'video';
+    } else {
+        const ext = file.name.split('.').pop()?.toLowerCase();
+        if (['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext || '')) {
+            detectedType = 'audio';
+        } else {
+            // Default to mediaType tab context if completely unknown, or default to video
+            detectedType = mediaType;
+        }
+    }
+
+    const type = detectedType; 
     
     let tempMedia: HTMLVideoElement | HTMLAudioElement;
     if (type === 'video') {
@@ -104,6 +125,7 @@ const App: React.FC = () => {
     }
     
     tempMedia.src = objectUrl;
+    tempMedia.preload = 'metadata';
     
     tempMedia.onloadedmetadata = () => {
         const duration = tempMedia.duration;
@@ -120,8 +142,9 @@ const App: React.FC = () => {
         if (fileInputRef.current) fileInputRef.current.value = '';
     };
 
-    tempMedia.onerror = () => {
-        alert("Failed to load file. Format might not be supported.");
+    tempMedia.onerror = (e) => {
+        console.error("File load error", e);
+        alert(`Failed to load file "${file.name}". The format might not be supported.`);
         tempMedia.remove();
         if (fileInputRef.current) fileInputRef.current.value = '';
     };
@@ -293,23 +316,55 @@ const App: React.FC = () => {
         start: 0,
         end: maxContentTime
     });
+    setExportUrl(null);
+    setExportMimeType('');
     setShowExportModal(true);
   };
 
   const startExport = () => {
     setShowExportModal(false);
-    
-    // Set up project for export
-    setProject(p => ({ ...p, currentTime: exportSettings.start, isPlaying: true }));
+    // Set up project for export: Start at beginning, but DO NOT play yet. 
+    // Player will handle internal playback sync with recorder.
+    setProject(p => ({ ...p, currentTime: exportSettings.start, isPlaying: false }));
     setIsExporting(true);
   };
 
-  const handleExportFinish = () => {
+  const handleExportFinish = (url: string | null, mimeType?: string) => {
       setIsExporting(false);
       setProject(p => ({ ...p, isPlaying: false }));
+      if (url) {
+          setExportUrl(url);
+          setExportMimeType(mimeType || '');
+      }
   };
 
-  const handleResolutionChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+  const downloadExportedVideo = () => {
+      if (!exportUrl) return;
+      
+      const a = document.createElement('a');
+      a.style.display = 'none';
+      a.href = exportUrl;
+      
+      // Smart extension handling
+      let extension = 'webm';
+      if (exportMimeType.includes('mp4')) {
+          extension = 'mp4';
+      } else if (exportMimeType.includes('webm')) {
+          extension = 'webm';
+      }
+      
+      a.download = `lumina_export_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.${extension}`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+          document.body.removeChild(a);
+          setExportUrl(null);
+          // Revoke URL to free memory, but only after we are sure user clicked
+          URL.revokeObjectURL(exportUrl);
+      }, 100);
+  };
+
+  const handleResolutionChange = (e: ChangeEvent<HTMLSelectElement>) => {
       const selected = RESOLUTIONS.find(r => r.name === e.target.value);
       if (selected) {
           setProject(p => ({
@@ -366,7 +421,7 @@ const App: React.FC = () => {
     : null;
 
   return (
-    <div className="flex flex-col h-screen bg-gray-950 text-white font-sans">
+    <div className="flex flex-col h-[100dvh] bg-gray-950 text-white font-sans">
       {/* Header / Toolbar */}
       <Toolbar 
         project={project}
@@ -376,6 +431,7 @@ const App: React.FC = () => {
         onTogglePlay={handleTogglePlay}
         onExport={handleExportClick}
         onOpenProjectManager={() => setShowProjectManager(true)}
+        isExporting={isExporting}
       />
 
       <div className="flex-1 flex overflow-hidden relative">
@@ -484,7 +540,7 @@ const App: React.FC = () => {
                     type="file" 
                     ref={fileInputRef}
                     className="hidden" 
-                    accept="video/*,audio/*"
+                    accept={mediaType === 'video' ? "video/*, .mp4, .mov, .webm, .mkv" : "audio/*, .mp3, .wav, .ogg, .m4a, .aac, .flac"}
                     onChange={handleFileUpload}
                 />
                 <button 
@@ -492,7 +548,7 @@ const App: React.FC = () => {
                     className="w-full py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs text-gray-300 transition-colors flex items-center justify-center"
                 >
                     <svg className="w-3 h-3 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
-                    Upload File
+                    Upload {mediaType === 'video' ? 'Video' : 'Audio'}
                 </button>
                 <div className="mt-1 text-[9px] text-gray-500 italic text-center">
                     Note: Uploaded files are not saved permanently in projects.
@@ -633,6 +689,37 @@ const App: React.FC = () => {
                             className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm font-medium"
                         >
                             Start Export
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {/* Download Ready Modal */}
+        {exportUrl && (
+            <div className="absolute inset-0 z-[70] bg-black/80 flex items-center justify-center">
+                <div className="bg-gray-800 p-6 rounded-lg shadow-2xl w-96 border border-gray-700 text-center">
+                    <div className="w-12 h-12 bg-green-500 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" /></svg>
+                    </div>
+                    <h3 className="text-xl font-bold mb-2">Export Complete!</h3>
+                    <p className="text-gray-400 text-sm mb-6">Your video is ready to be downloaded.</p>
+                    
+                    <div className="flex flex-col space-y-3">
+                        <button 
+                            onClick={downloadExportedVideo}
+                            className="w-full px-4 py-3 bg-blue-600 hover:bg-blue-500 rounded text-sm font-bold text-white shadow-lg transition-transform active:scale-95"
+                        >
+                            Download Video
+                        </button>
+                        <button 
+                            onClick={() => {
+                                setExportUrl(null);
+                                URL.revokeObjectURL(exportUrl);
+                            }}
+                            className="w-full px-4 py-2 text-sm text-gray-400 hover:text-white"
+                        >
+                            Close
                         </button>
                     </div>
                 </div>

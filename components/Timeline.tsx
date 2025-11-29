@@ -1,6 +1,5 @@
-
-import React, { useRef, useState, useEffect } from 'react';
-import { Clip, Track, ProjectState } from '../types';
+import { useRef, useState, useEffect, type FC, type MouseEvent, type TouchEvent } from 'react';
+import { Clip, ProjectState } from '../types';
 import { TRACK_HEIGHT } from '../constants';
 
 interface TimelineProps {
@@ -10,54 +9,133 @@ interface TimelineProps {
   onClipSelect: (id: string | null) => void;
 }
 
-const Timeline: React.FC<TimelineProps> = ({ project, onSeek, onClipUpdate, onClipSelect }) => {
+const Timeline: FC<TimelineProps> = ({ project, onSeek, onClipUpdate, onClipSelect }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [draggingClip, setDraggingClip] = useState<{ id: string, startX: number, originalOffset: number } | null>(null);
-  const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
+  
+  // Interaction State
+  const [dragState, setDragState] = useState<{
+      isDragging: boolean;
+      clipId: string | null;
+      startX: number;
+      originalOffset: number;
+      originalStart: number;
+      originalEnd: number;
+      interactionType: 'move' | 'trim-start' | 'trim-end';
+  }>({
+      isDragging: false,
+      clipId: null,
+      startX: 0,
+      originalOffset: 0,
+      originalStart: 0,
+      originalEnd: 0,
+      interactionType: 'move'
+  });
 
-  // Touch handling refs
-  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  
+  // Touch / Long Press Handling
+  const longPressTimer = useRef<number | null>(null);
   const touchStartPos = useRef<{x: number, y: number} | null>(null);
 
-  const handleMouseDown = (e: React.MouseEvent, clip: Clip) => {
-    e.stopPropagation();
-    onClipSelect(clip.id);
-    setDraggingClip({
-      id: clip.id,
-      startX: e.clientX,
-      originalOffset: clip.offset
-    });
+  const pixelsPerSecond = project.zoom;
+
+  // Helper: Convert X position to Timeline Time
+  const getTimelineTime = (clientX: number) => {
+    if (!containerRef.current || !scrollContainerRef.current) return 0;
+    const rect = containerRef.current.getBoundingClientRect();
+    const scrollLeft = scrollContainerRef.current.scrollLeft;
+    const x = clientX - rect.left + scrollLeft;
+    return Math.max(0, x / pixelsPerSecond);
   };
 
-  // Touch Handlers for Clips (Long Press)
-  const handleClipTouchStart = (e: React.TouchEvent, clip: Clip) => {
-    // We don't stop propagation immediately to allow for potential scrolling if it's not a long press
-    const touch = e.touches[0];
-    touchStartPos.current = { x: touch.clientX, y: touch.clientY };
-    
-    longPressTimer.current = setTimeout(() => {
-        // Long press detected - Enter drag mode
-        onClipSelect(clip.id);
-        setDraggingClip({
-            id: clip.id,
-            startX: touch.clientX,
-            originalOffset: clip.offset
-        });
-        // Haptic feedback
-        if (navigator.vibrate) navigator.vibrate(50);
-    }, 500); // 500ms threshold
+  // --- MOUSE HANDLERS FOR CLIPS ---
+
+  const handleClipMouseDown = (e: MouseEvent, clip: Clip) => {
+      e.stopPropagation();
+      onClipSelect(clip.id);
+      
+      setDragState({
+          isDragging: true,
+          clipId: clip.id,
+          startX: e.clientX,
+          originalOffset: clip.offset,
+          originalStart: clip.start,
+          originalEnd: clip.end,
+          interactionType: 'move'
+      });
   };
 
-  const handleClipTouchMove = (e: React.TouchEvent) => {
-      // If waiting for long press, check if finger moved too much (scrolling)
-      if (longPressTimer.current && touchStartPos.current) {
+  const handleTrimMouseDown = (e: MouseEvent, clip: Clip, type: 'trim-start' | 'trim-end') => {
+      e.stopPropagation();
+      e.preventDefault(); // Prevent text selection
+      onClipSelect(clip.id);
+
+      setDragState({
+          isDragging: true,
+          clipId: clip.id,
+          startX: e.clientX,
+          originalOffset: clip.offset,
+          originalStart: clip.start,
+          originalEnd: clip.end,
+          interactionType: type
+      });
+  };
+
+  // --- TOUCH HANDLERS FOR CLIPS ---
+
+  const handleClipTouchStart = (e: TouchEvent, clip: Clip) => {
+      const touch = e.touches[0];
+      touchStartPos.current = { x: touch.clientX, y: touch.clientY };
+
+      // Long press detection for moving clips (prevents accidental moves when scrolling)
+      longPressTimer.current = window.setTimeout(() => {
+          onClipSelect(clip.id);
+          setDragState({
+              isDragging: true,
+              clipId: clip.id,
+              startX: touch.clientX,
+              originalOffset: clip.offset,
+              originalStart: clip.start,
+              originalEnd: clip.end,
+              interactionType: 'move'
+          });
+          // Optional haptic feedback could go here
+      }, 300); // Reduced delay for better responsiveness
+  };
+
+  const handleTrimTouchStart = (e: TouchEvent, clip: Clip, type: 'trim-start' | 'trim-end') => {
+      e.stopPropagation();
+      const touch = e.touches[0];
+      onClipSelect(clip.id);
+
+      setDragState({
+          isDragging: true,
+          clipId: clip.id,
+          startX: touch.clientX,
+          originalOffset: clip.offset,
+          originalStart: clip.start,
+          originalEnd: clip.end,
+          interactionType: type
+      });
+  };
+
+  const handleClipTouchMove = (e: TouchEvent) => {
+      if (dragState.isDragging) {
+          // If we are already dragging, prevent scrolling
+          e.preventDefault();
+      } else if (touchStartPos.current) {
+          // Check if moved too much to cancel long press
           const touch = e.touches[0];
-          const dx = Math.abs(touch.clientX - touchStartPos.current.x);
-          const dy = Math.abs(touch.clientY - touchStartPos.current.y);
-          
-          if (dx > 10 || dy > 10) {
-              clearTimeout(longPressTimer.current);
-              longPressTimer.current = null;
+          const dist = Math.sqrt(
+              Math.pow(touch.clientX - touchStartPos.current.x, 2) + 
+              Math.pow(touch.clientY - touchStartPos.current.y, 2)
+          );
+          if (dist > 10) { // Tolerance
+              if (longPressTimer.current) {
+                  clearTimeout(longPressTimer.current);
+                  longPressTimer.current = null;
+              }
           }
       }
   };
@@ -69,188 +147,214 @@ const Timeline: React.FC<TimelineProps> = ({ project, onSeek, onClipUpdate, onCl
       }
   };
 
-  const handlePlayheadMouseDown = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setIsDraggingPlayhead(true);
-  };
 
-  const handlePlayheadTouchStart = (e: React.TouchEvent) => {
-      e.stopPropagation();
+  // --- GLOBAL MOVE HANDLER (Mouse & Touch) ---
+
+  useEffect(() => {
+      const handleGlobalMove = (e: globalThis.MouseEvent | globalThis.TouchEvent) => {
+          // Handle Playhead Dragging
+          if (isDraggingPlayhead) {
+              e.preventDefault(); // Stop scroll while dragging playhead
+              const clientX = 'touches' in e ? e.touches[0].clientX : (e as globalThis.MouseEvent).clientX;
+              const newTime = getTimelineTime(clientX);
+              onSeek(newTime);
+              return;
+          }
+
+          // Handle Clip Dragging / Trimming
+          if (dragState.isDragging && dragState.clipId) {
+              e.preventDefault(); // Stop scroll while dragging/trimming clip
+
+              const clientX = 'touches' in e ? e.touches[0].clientX : (e as globalThis.MouseEvent).clientX;
+              const deltaPixels = clientX - dragState.startX;
+              const deltaTime = deltaPixels / pixelsPerSecond;
+
+              const clip = project.clips.find(c => c.id === dragState.clipId);
+              if (!clip) return;
+
+              let updatedClip = { ...clip };
+
+              if (dragState.interactionType === 'move') {
+                  const newOffset = Math.max(0, dragState.originalOffset + deltaTime);
+                  updatedClip.offset = newOffset;
+              } 
+              else if (dragState.interactionType === 'trim-start') {
+                  let newStart = dragState.originalStart + deltaTime;
+                  
+                  // Constrain
+                  if (newStart < 0) newStart = 0;
+                  if (newStart > dragState.originalEnd - 0.1) newStart = dragState.originalEnd - 0.1;
+
+                  const offsetShift = newStart - dragState.originalStart;
+                  
+                  updatedClip.start = newStart;
+                  updatedClip.offset = dragState.originalOffset + offsetShift;
+              } 
+              else if (dragState.interactionType === 'trim-end') {
+                  let newEnd = dragState.originalEnd + deltaTime;
+                  
+                  if (newEnd > clip.duration) newEnd = clip.duration; 
+                  if (newEnd < clip.start + 0.1) newEnd = clip.start + 0.1;
+
+                  updatedClip.end = newEnd;
+              }
+
+              onClipUpdate(updatedClip);
+          }
+      };
+
+      const handleGlobalUp = () => {
+          setDragState(prev => ({ ...prev, isDragging: false, clipId: null }));
+          setIsDraggingPlayhead(false);
+      };
+
+      if (dragState.isDragging || isDraggingPlayhead) {
+          window.addEventListener('mousemove', handleGlobalMove);
+          window.addEventListener('mouseup', handleGlobalUp);
+          // Use passive: false to allow preventDefault
+          window.addEventListener('touchmove', handleGlobalMove, { passive: false });
+          window.addEventListener('touchend', handleGlobalUp);
+          window.addEventListener('touchcancel', handleGlobalUp);
+      }
+
+      return () => {
+          window.removeEventListener('mousemove', handleGlobalMove);
+          window.removeEventListener('mouseup', handleGlobalUp);
+          window.removeEventListener('touchmove', handleGlobalMove);
+          window.removeEventListener('touchend', handleGlobalUp);
+          window.removeEventListener('touchcancel', handleGlobalUp);
+      };
+  }, [dragState, isDraggingPlayhead, project.clips, pixelsPerSecond, onClipUpdate, onSeek]);
+
+
+  // --- PLAYHEAD HANDLERS ---
+  
+  const handleRulerMouseDown = (e: MouseEvent) => {
+      const newTime = getTimelineTime(e.clientX);
+      onSeek(newTime);
       setIsDraggingPlayhead(true);
   };
 
-  const handleTimelineClick = (e: React.MouseEvent) => {
-    if (!containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const scrollLeft = containerRef.current.scrollLeft;
-    const newTime = (clickX + scrollLeft) / project.zoom;
-    onSeek(Math.max(0, newTime));
-  };
-
-  // Global Drag Handlers
-  useEffect(() => {
-    const handleGlobalMove = (clientX: number) => {
-      if (draggingClip) {
-        const deltaPixels = clientX - draggingClip.startX;
-        const deltaSeconds = deltaPixels / project.zoom;
-        const newOffset = Math.max(0, draggingClip.originalOffset + deltaSeconds);
-        
-        const clip = project.clips.find(c => c.id === draggingClip.id);
-        if (clip) {
-          onClipUpdate({ ...clip, offset: newOffset });
-        }
-      }
-
-      if (isDraggingPlayhead && containerRef.current) {
-         const rect = containerRef.current.getBoundingClientRect();
-         // Account for scroll
-         const x = clientX - rect.left + containerRef.current.scrollLeft;
-         const newTime = Math.max(0, x / project.zoom);
-         onSeek(newTime);
-      }
-    };
-
-    const handleMouseUp = () => {
-      if (draggingClip) setDraggingClip(null);
-      if (isDraggingPlayhead) setIsDraggingPlayhead(false);
-    };
-
-    const onMouseMove = (e: MouseEvent) => handleGlobalMove(e.clientX);
-    const onTouchMove = (e: TouchEvent) => {
-        if (draggingClip || isDraggingPlayhead) {
-            e.preventDefault(); // Prevent scrolling while dragging
-            handleGlobalMove(e.touches[0].clientX);
-        }
-    };
-
-    if (draggingClip || isDraggingPlayhead) {
-      window.addEventListener('mousemove', onMouseMove);
-      window.addEventListener('mouseup', handleMouseUp);
-      // Passive: false is needed to allow preventDefault
-      window.addEventListener('touchmove', onTouchMove, { passive: false });
-      window.addEventListener('touchend', handleMouseUp);
-      window.addEventListener('touchcancel', handleMouseUp);
-    }
-
-    return () => {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-      window.removeEventListener('touchmove', onTouchMove);
-      window.removeEventListener('touchend', handleMouseUp);
-      window.removeEventListener('touchcancel', handleMouseUp);
-    };
-  }, [draggingClip, isDraggingPlayhead, project.clips, project.zoom, onClipUpdate, onSeek]);
-
-  // Helper to generate time markers
-  const renderRuler = () => {
-    const markers = [];
-    const totalSeconds = Math.max(project.duration + 60, 300); // Minimum 5 mins
-    const step = 5; // every 5 seconds
-
-    for (let i = 0; i <= totalSeconds; i += step) {
-      markers.push(
-        <div 
-          key={i} 
-          className="absolute top-0 h-4 border-l border-gray-600 text-xs text-gray-400 pl-1 select-none"
-          style={{ left: i * project.zoom }}
-        >
-          {i % 10 === 0 ? formatTime(i) : ''}
-        </div>
-      );
-    }
-    return markers;
-  };
-
-  const formatTime = (seconds: number) => {
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60);
-    return `${m}:${s.toString().padStart(2, '0')}`;
+  const handlePlayheadTouchStart = (e: TouchEvent) => {
+      const newTime = getTimelineTime(e.touches[0].clientX);
+      onSeek(newTime);
+      setIsDraggingPlayhead(true);
   };
 
   return (
-    <div 
-      className="flex-1 bg-gray-900 overflow-x-auto overflow-y-hidden relative select-none custom-scrollbar"
-      ref={containerRef}
-    >
-        {/* Ruler */}
-        <div 
-            className="h-8 bg-gray-800 border-b border-gray-700 relative sticky top-0 z-30 cursor-pointer"
-            onClick={handleTimelineClick}
-            style={{ minWidth: (project.duration + 60) * project.zoom }}
-        >
-            {renderRuler()}
-            {/* Playhead Indicator in Ruler - Made Draggable */}
+    <div className="flex-1 flex flex-col min-w-0 bg-gray-900 overflow-hidden select-none">
+      <div 
+        ref={scrollContainerRef}
+        className="flex-1 overflow-x-auto overflow-y-auto relative custom-scrollbar"
+      >
+         <div 
+            ref={containerRef}
+            className="relative min-w-full"
+            style={{ 
+                width: Math.max(project.duration * pixelsPerSecond + 200, window.innerWidth) + 'px',
+                height: Math.max(project.tracks.length * TRACK_HEIGHT + 40, 200) + 'px'
+            }}
+         >
+            {/* Ruler / Playhead Track */}
             <div 
-                className="absolute top-0 bottom-0 w-4 h-full -ml-2 cursor-ew-resize z-40 group flex flex-col items-center"
-                style={{ left: project.currentTime * project.zoom }}
-                onMouseDown={handlePlayheadMouseDown}
+                className="h-6 border-b border-gray-800 sticky top-0 bg-gray-900/90 z-20 cursor-pointer"
+                onMouseDown={handleRulerMouseDown}
                 onTouchStart={handlePlayheadTouchStart}
             >
-               <div className="w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-t-[8px] border-t-red-500 group-hover:border-t-red-400 transition-colors" />
-            </div>
-        </div>
-
-        {/* Tracks Area */}
-        <div className="relative" style={{ minWidth: (project.duration + 60) * project.zoom }}>
-            
-            {/* Playhead Line */}
-            <div 
-                className="absolute top-0 bottom-0 w-px bg-red-500 z-20 pointer-events-none"
-                style={{ left: project.currentTime * project.zoom, height: project.tracks.length * TRACK_HEIGHT }}
-            />
-
-            {project.tracks.map((track) => (
-                <div 
-                    key={track.id}
-                    className="relative border-b border-gray-800 bg-gray-900/50"
-                    style={{ height: TRACK_HEIGHT }}
-                >
-                    <div className="absolute left-2 top-2 text-[10px] text-gray-500 pointer-events-none uppercase font-semibold">
-                      {track.name}
+                {/* Time markers every 5 seconds */}
+                {Array.from({ length: Math.ceil(project.duration / 5) + 2 }).map((_, i) => (
+                    <div 
+                        key={i} 
+                        className="absolute bottom-0 text-[10px] text-gray-500 border-l border-gray-700 pl-1"
+                        style={{ left: (i * 5) * pixelsPerSecond }}
+                    >
+                        {i * 5}s
                     </div>
-                    {project.clips
-                        .filter(c => c.track === track.id)
-                        .map(clip => {
-                            const width = (clip.end - clip.start) * project.zoom;
-                            const left = clip.offset * project.zoom;
-                            const isSelected = clip.id === project.selectedClipId;
-                            const isAudio = clip.type === 'audio';
+                ))}
+            </div>
 
+            {/* Tracks & Clips */}
+            <div className="pt-2">
+                {project.tracks.map((track) => (
+                    <div 
+                        key={track.id}
+                        className="relative border-b border-gray-800/50"
+                        style={{ height: TRACK_HEIGHT }}
+                    >
+                        {/* Track Label */}
+                        <div className="absolute left-2 top-2 text-[10px] text-gray-600 font-mono pointer-events-none z-0">
+                            {track.name}
+                        </div>
+
+                        {/* Render Clips for this track */}
+                        {project.clips.filter(c => c.track === track.id).map(clip => {
+                            const width = (clip.end - clip.start) * pixelsPerSecond;
+                            const left = clip.offset * pixelsPerSecond;
+                            const isSelected = project.selectedClipId === clip.id;
+                            
                             return (
                                 <div
                                     key={clip.id}
-                                    onMouseDown={(e) => handleMouseDown(e, clip)}
+                                    className={`absolute top-6 h-12 rounded cursor-pointer overflow-visible border transition-colors group
+                                        ${isSelected ? 'border-yellow-400 ring-1 ring-yellow-400 z-10' : 'border-gray-700'}
+                                        ${clip.type === 'video' ? 'bg-blue-900/80 hover:bg-blue-800' : 'bg-green-900/80 hover:bg-green-800'}
+                                    `}
+                                    style={{ left, width }}
+                                    onMouseDown={(e) => handleClipMouseDown(e, clip)}
                                     onTouchStart={(e) => handleClipTouchStart(e, clip)}
                                     onTouchMove={handleClipTouchMove}
                                     onTouchEnd={handleClipTouchEnd}
-                                    onTouchCancel={handleClipTouchEnd}
-                                    className={`absolute top-6 bottom-2 rounded cursor-move overflow-hidden border ${isSelected ? 'border-yellow-400 ring-2 ring-yellow-400/30' : isAudio ? 'border-green-600' : 'border-blue-600'}`}
-                                    style={{ 
-                                        left, 
-                                        width, 
-                                        backgroundColor: isAudio ? '#2f855a' : '#2b6cb0',
-                                        zIndex: isSelected ? 10 : 1,
-                                        transform: draggingClip?.id === clip.id ? 'scale(1.02)' : 'none',
-                                        transition: 'transform 0.1s'
-                                    }}
                                 >
-                                    <div className="px-2 py-1 text-xs text-white font-medium truncate">
+                                    {/* Clip Info */}
+                                    <div className="px-2 py-1 truncate text-xs text-white/90 select-none pointer-events-none overflow-hidden">
                                         {clip.name}
                                     </div>
-                                    <div className="px-2 text-[10px] opacity-70 flex justify-between">
-                                        <span>{(clip.end - clip.start).toFixed(1)}s</span>
-                                    </div>
-                                    {/* Clip Handles (Visual only for now) */}
-                                    <div className="absolute left-0 top-0 bottom-0 w-2 bg-white/10 hover:bg-white/30 cursor-ew-resize" />
-                                    <div className="absolute right-0 top-0 bottom-0 w-2 bg-white/10 hover:bg-white/30 cursor-ew-resize" />
+                                    
+                                    {/* Trim Handles (Only visible on hover or selection) */}
+                                    {(isSelected || dragState.clipId === clip.id) && (
+                                        <>
+                                            {/* Left Handle */}
+                                            <div 
+                                                className="absolute top-0 bottom-0 -left-3 w-6 cursor-ew-resize z-20 flex items-center justify-center group/handle"
+                                                onMouseDown={(e) => handleTrimMouseDown(e, clip, 'trim-start')}
+                                                onTouchStart={(e) => handleTrimTouchStart(e, clip, 'trim-start')}
+                                            >
+                                                {/* Visual Handle Bar */}
+                                                <div className="w-3 h-full bg-yellow-400/50 group-hover/handle:bg-yellow-400 rounded-l-sm flex items-center justify-center">
+                                                    <div className="w-0.5 h-4 bg-black/50"></div>
+                                                </div>
+                                            </div>
+
+                                            {/* Right Handle */}
+                                            <div 
+                                                className="absolute top-0 bottom-0 -right-3 w-6 cursor-ew-resize z-20 flex items-center justify-center group/handle"
+                                                onMouseDown={(e) => handleTrimMouseDown(e, clip, 'trim-end')}
+                                                onTouchStart={(e) => handleTrimTouchStart(e, clip, 'trim-end')}
+                                            >
+                                                {/* Visual Handle Bar */}
+                                                <div className="w-3 h-full bg-yellow-400/50 group-hover/handle:bg-yellow-400 rounded-r-sm flex items-center justify-center">
+                                                    <div className="w-0.5 h-4 bg-black/50"></div>
+                                                </div>
+                                            </div>
+                                        </>
+                                    )}
                                 </div>
                             );
-                        })
-                    }
-                </div>
-            ))}
-        </div>
+                        })}
+                    </div>
+                ))}
+            </div>
+
+            {/* Playhead Line */}
+            <div 
+                className="absolute top-0 bottom-0 w-px bg-red-500 z-30 pointer-events-none"
+                style={{ left: project.currentTime * pixelsPerSecond }}
+            >
+                <div className="w-3 h-3 -ml-1.5 bg-red-500 rounded-full shadow-sm" />
+            </div>
+
+         </div>
+      </div>
     </div>
   );
 };
