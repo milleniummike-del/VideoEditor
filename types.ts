@@ -36,6 +36,9 @@ export interface ProjectState {
   duration: number;
   currentTime: number;
   isPlaying: boolean;
+  isLooping: boolean; // Added loop state
+  inPoint: number | null; // Added In Marker
+  outPoint: number | null; // Added Out Marker
   selectedClipId: string | null;
   zoom: number; // Pixels per second
   width: number; // Project Resolution Width

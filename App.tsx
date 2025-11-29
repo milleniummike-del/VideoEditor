@@ -1,3 +1,4 @@
+
 import { useState, useCallback, useEffect, useMemo, useRef, type FC, type ChangeEvent } from 'react';
 import { ProjectState, Clip, Track, LibraryClip } from './types';
 import { INITIAL_TRACKS, STOCK_CLIPS, PIXELS_PER_SECOND_DEFAULT, RESOLUTIONS } from './constants';
@@ -31,6 +32,9 @@ const App: FC = () => {
         duration: 30, // Initial workspace duration
         currentTime: 0,
         isPlaying: false,
+        isLooping: false,
+        inPoint: null,
+        outPoint: null,
         selectedClipId: null,
         zoom: PIXELS_PER_SECOND_DEFAULT,
         width: RESOLUTIONS[0].width,
@@ -47,6 +51,9 @@ const App: FC = () => {
 
   // Project Manager State
   const [showProjectManager, setShowProjectManager] = useState(false);
+
+  // Transition Settings State
+  const [transitionDuration, setTransitionDuration] = useState(1.0);
 
   const handleTimeUpdate = useCallback((time: number) => {
     setProject(p => {
@@ -71,18 +78,61 @@ const App: FC = () => {
     setProject(p => ({ ...p, isPlaying: !p.isPlaying }));
   }, [isExporting]);
 
+  // Marker Handlers
+  const handleSetInPoint = () => {
+      setProject(p => {
+          let newIn = p.currentTime;
+          // Ensure In is before Out
+          if (p.outPoint !== null && newIn >= p.outPoint) {
+              return { ...p, inPoint: newIn, outPoint: null };
+          }
+          return { ...p, inPoint: newIn };
+      });
+  };
+
+  const handleSetOutPoint = () => {
+      setProject(p => {
+          let newOut = p.currentTime;
+          // Ensure Out is after In
+          if (p.inPoint !== null && newOut <= p.inPoint) {
+              // If dragging backwards, maybe swap? simpler to just prevent or clear In
+              return { ...p, outPoint: newOut, inPoint: null };
+          }
+          return { ...p, outPoint: newOut };
+      });
+  };
+
+  const handleClearMarkers = () => {
+      setProject(p => ({ ...p, inPoint: null, outPoint: null }));
+  };
+  
+  const handleMarkerUpdate = (inPoint: number | null, outPoint: number | null) => {
+      setProject(p => ({ ...p, inPoint, outPoint }));
+  };
+
+  const handleToggleLoop = () => {
+      setProject(p => ({ ...p, isLooping: !p.isLooping }));
+  };
+
+
   // Global Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Avoid triggering when user is typing in inputs
+      const activeTag = document.activeElement?.tagName.toLowerCase();
+      if (activeTag === 'input' || activeTag === 'textarea') {
+        return;
+      }
+
       if (e.code === 'Space') {
-        // Avoid triggering when user is typing in inputs
-        const activeTag = document.activeElement?.tagName.toLowerCase();
-        if (activeTag === 'input' || activeTag === 'textarea') {
-          return;
-        }
-        
         e.preventDefault(); // Prevent page scrolling
         handleTogglePlay();
+      } else if (e.key.toLowerCase() === 'i') {
+          handleSetInPoint();
+      } else if (e.key.toLowerCase() === 'o') {
+          handleSetOutPoint();
+      } else if (e.shiftKey && e.key.toLowerCase() === 'x') {
+          handleClearMarkers();
       }
     };
 
@@ -254,6 +304,61 @@ const App: FC = () => {
     }));
   };
 
+  const handleApplyTransition = (type: 'cut' | 'dissolve') => {
+      if (!project.selectedClipId) return;
+      const currentClip = project.clips.find(c => c.id === project.selectedClipId);
+      if (!currentClip) return;
+
+      // Find previous clip on same track
+      const sortedTrackClips = project.clips
+          .filter(c => c.track === currentClip.track && c.id !== currentClip.id)
+          .sort((a, b) => a.offset - b.offset);
+      
+      const prevClip = sortedTrackClips.filter(c => c.offset < currentClip.offset).pop();
+
+      if (!prevClip) {
+          // If no previous clip, we can still set fade in/out but no overlap
+          if (type === 'dissolve') {
+              handleUpdateClip({ ...currentClip, fadeIn: transitionDuration });
+          } else {
+              handleUpdateClip({ ...currentClip, fadeIn: 0 });
+          }
+          return;
+      }
+
+      let updatedCurrent = { ...currentClip };
+      let updatedPrev = { ...prevClip }; // We might modify prev clip too? Usually only next.
+
+      if (type === 'dissolve') {
+          // AUTO OVERLAP LOGIC
+          // 1. Calculate desired start point for current clip: PrevClip.End - Duration
+          const prevClipEnd = prevClip.offset + (prevClip.end - prevClip.start);
+          const desiredOffset = prevClipEnd - transitionDuration;
+          
+          if (desiredOffset < 0) return; // Can't move before start
+
+          // 2. Move current clip to overlap
+          updatedCurrent.offset = desiredOffset;
+          updatedCurrent.fadeIn = transitionDuration;
+          
+          // Optional: Extend prev clip? No, assuming prev clip is long enough or we just overlap what exists.
+      } else {
+          // CUT: Remove Fade, Snap to end of prev clip (remove overlap)
+          const prevClipEnd = prevClip.offset + (prevClip.end - prevClip.start);
+          updatedCurrent.offset = prevClipEnd;
+          updatedCurrent.fadeIn = 0;
+      }
+
+      setProject(p => ({
+          ...p,
+          clips: p.clips.map(c => {
+              if (c.id === updatedCurrent.id) return updatedCurrent;
+              // if (c.id === updatedPrev.id) return updatedPrev;
+              return c;
+          })
+      }));
+  };
+
   const handleSelectClip = (id: string | null) => {
     setProject(p => ({ ...p, selectedClipId: id }));
   };
@@ -307,14 +412,21 @@ const App: FC = () => {
     // Calculate content bounds
     const maxContentTime = project.clips.reduce((max, clip) => Math.max(max, clip.offset + (clip.end - clip.start)), 0);
     
-    if (maxContentTime === 0) {
+    // Default to In/Out points if set, otherwise max content
+    let start = 0;
+    let end = maxContentTime;
+    
+    if (project.inPoint !== null) start = project.inPoint;
+    if (project.outPoint !== null && project.outPoint > start) end = project.outPoint;
+    
+    if (maxContentTime === 0 && (project.inPoint === null || project.outPoint === null)) {
         alert("Timeline is empty.");
         return;
     }
 
     setExportSettings({
-        start: 0,
-        end: maxContentTime
+        start: start,
+        end: end
     });
     setExportUrl(null);
     setExportMimeType('');
@@ -389,6 +501,9 @@ const App: FC = () => {
         duration: typeof loadedProject.duration === 'number' ? loadedProject.duration : 30,
         currentTime: 0,
         isPlaying: false,
+        isLooping: !!loadedProject.isLooping,
+        inPoint: typeof loadedProject.inPoint === 'number' ? loadedProject.inPoint : null,
+        outPoint: typeof loadedProject.outPoint === 'number' ? loadedProject.outPoint : null,
         selectedClipId: null,
         zoom: loadedProject.zoom || PIXELS_PER_SECOND_DEFAULT,
         width: loadedProject.width || RESOLUTIONS[0].width,
@@ -432,6 +547,10 @@ const App: FC = () => {
         onExport={handleExportClick}
         onOpenProjectManager={() => setShowProjectManager(true)}
         isExporting={isExporting}
+        onSetInPoint={handleSetInPoint}
+        onSetOutPoint={handleSetOutPoint}
+        onClearMarkers={handleClearMarkers}
+        onToggleLoop={handleToggleLoop}
       />
 
       <div className="flex-1 flex overflow-hidden relative">
@@ -463,9 +582,53 @@ const App: FC = () => {
            {selectedClip && (
                <div className="mb-6 border-b border-gray-800 pb-4 animate-in fade-in slide-in-from-left-2 duration-200">
                    <h2 className="text-sm font-semibold text-blue-400 uppercase mb-3">Selected Clip</h2>
-                   <div className="text-xs font-medium text-white mb-2 truncate">{selectedClip.name}</div>
                    
-                   <div className="grid grid-cols-2 gap-3">
+                   <div className="mb-3">
+                       <label className="text-[10px] text-gray-500 mb-1 block">Clip Name</label>
+                       <input 
+                           type="text" 
+                           value={selectedClip.name}
+                           onChange={(e) => handleUpdateClip({...selectedClip, name: e.target.value})}
+                           onKeyDown={(e) => e.stopPropagation()}
+                           className="w-full bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1 focus:outline-none focus:border-blue-500"
+                       />
+                   </div>
+                   
+                   <div className="mb-3 border-t border-gray-700 pt-3">
+                        <label className="text-[10px] text-gray-500 mb-2 block uppercase tracking-wider">Transition (In)</label>
+                        <div className="flex space-x-2 mb-2">
+                             <button 
+                                onClick={() => handleApplyTransition('cut')}
+                                className="flex-1 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs py-1"
+                             >
+                                Cut (None)
+                             </button>
+                             <button 
+                                onClick={() => handleApplyTransition('dissolve')}
+                                className="flex-1 bg-blue-900/50 hover:bg-blue-800 border border-blue-800 rounded text-xs py-1 text-blue-200"
+                             >
+                                Cross Dissolve
+                             </button>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                            <label className="text-[10px] text-gray-500">Duration:</label>
+                             <input 
+                               type="number" 
+                               min="0.1"
+                               max="5"
+                               step="0.1"
+                               value={transitionDuration}
+                               onChange={(e) => setTransitionDuration(Number(e.target.value))}
+                               className="w-16 bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1 focus:outline-none focus:border-blue-500"
+                           />
+                           <span className="text-[10px] text-gray-500">s</span>
+                        </div>
+                        <p className="text-[9px] text-gray-500 mt-1 italic">
+                            'Dissolve' overlaps clip with previous clip.
+                        </p>
+                   </div>
+                   
+                   <div className="grid grid-cols-2 gap-3 border-t border-gray-700 pt-3">
                        <div>
                            <label className="text-[10px] text-gray-500 mb-1 block">Fade In (s)</label>
                            <input 
@@ -630,6 +793,7 @@ const App: FC = () => {
                     onSeek={handleSeek}
                     onClipUpdate={handleUpdateClip}
                     onClipSelect={handleSelectClip}
+                    onMarkerUpdate={handleMarkerUpdate}
                 />
             </div>
         </div>
@@ -670,7 +834,7 @@ const App: FC = () => {
                                 className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none"
                                 min="0"
                             />
-                            <p className="text-[10px] text-gray-500 mt-1">Defaults to the end of the last clip.</p>
+                            <p className="text-[10px] text-gray-500 mt-1">Defaults to In/Out points if set, or end of last clip.</p>
                         </div>
                         <div className="pt-2 border-t border-gray-700">
                             <p className="text-xs text-gray-400">Output Resolution: <span className="text-white">{project.width}x{project.height}</span></p>

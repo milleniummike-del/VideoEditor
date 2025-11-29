@@ -1,3 +1,4 @@
+
 import { useRef, useState, useEffect, type FC, type MouseEvent, type TouchEvent } from 'react';
 import { Clip, ProjectState } from '../types';
 import { TRACK_HEIGHT } from '../constants';
@@ -7,9 +8,10 @@ interface TimelineProps {
   onSeek: (time: number) => void;
   onClipUpdate: (clip: Clip) => void;
   onClipSelect: (id: string | null) => void;
+  onMarkerUpdate: (inPoint: number | null, outPoint: number | null) => void;
 }
 
-const Timeline: FC<TimelineProps> = ({ project, onSeek, onClipUpdate, onClipSelect }) => {
+const Timeline: FC<TimelineProps> = ({ project, onSeek, onClipUpdate, onClipSelect, onMarkerUpdate }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   
   // Interaction State
@@ -20,7 +22,7 @@ const Timeline: FC<TimelineProps> = ({ project, onSeek, onClipUpdate, onClipSele
       originalOffset: number;
       originalStart: number;
       originalEnd: number;
-      interactionType: 'move' | 'trim-start' | 'trim-end';
+      interactionType: 'move' | 'trim-start' | 'trim-end' | 'move-in-marker' | 'move-out-marker';
   }>({
       isDragging: false,
       clipId: null,
@@ -147,6 +149,39 @@ const Timeline: FC<TimelineProps> = ({ project, onSeek, onClipUpdate, onClipSele
       }
   };
 
+  // --- MARKER HANDLERS ---
+
+  const handleMarkerMouseDown = (e: MouseEvent, type: 'in' | 'out') => {
+      e.stopPropagation();
+      e.preventDefault();
+      
+      setDragState({
+          isDragging: true,
+          clipId: null, // Not used for markers
+          startX: e.clientX,
+          originalOffset: type === 'in' ? (project.inPoint || 0) : (project.outPoint || 0),
+          originalStart: 0,
+          originalEnd: 0,
+          interactionType: type === 'in' ? 'move-in-marker' : 'move-out-marker'
+      });
+  };
+
+  const handleMarkerTouchStart = (e: TouchEvent, type: 'in' | 'out') => {
+      e.stopPropagation();
+      // e.preventDefault(); // Might interfere with scrolling if not carefully used, but for marker drag we need to stop default
+      
+      const touch = e.touches[0];
+      setDragState({
+          isDragging: true,
+          clipId: null,
+          startX: touch.clientX,
+          originalOffset: type === 'in' ? (project.inPoint || 0) : (project.outPoint || 0),
+          originalStart: 0,
+          originalEnd: 0,
+          interactionType: type === 'in' ? 'move-in-marker' : 'move-out-marker'
+      });
+  };
+
 
   // --- GLOBAL MOVE HANDLER (Mouse & Touch) ---
 
@@ -161,45 +196,69 @@ const Timeline: FC<TimelineProps> = ({ project, onSeek, onClipUpdate, onClipSele
               return;
           }
 
-          // Handle Clip Dragging / Trimming
-          if (dragState.isDragging && dragState.clipId) {
-              e.preventDefault(); // Stop scroll while dragging/trimming clip
+          // Handle Clip / Marker Dragging
+          if (dragState.isDragging) {
+              e.preventDefault(); // Stop scroll
 
               const clientX = 'touches' in e ? e.touches[0].clientX : (e as globalThis.MouseEvent).clientX;
               const deltaPixels = clientX - dragState.startX;
               const deltaTime = deltaPixels / pixelsPerSecond;
 
-              const clip = project.clips.find(c => c.id === dragState.clipId);
-              if (!clip) return;
-
-              let updatedClip = { ...clip };
-
-              if (dragState.interactionType === 'move') {
-                  const newOffset = Math.max(0, dragState.originalOffset + deltaTime);
-                  updatedClip.offset = newOffset;
-              } 
-              else if (dragState.interactionType === 'trim-start') {
-                  let newStart = dragState.originalStart + deltaTime;
-                  
-                  // Constrain
-                  if (newStart < 0) newStart = 0;
-                  if (newStart > dragState.originalEnd - 0.1) newStart = dragState.originalEnd - 0.1;
-
-                  const offsetShift = newStart - dragState.originalStart;
-                  
-                  updatedClip.start = newStart;
-                  updatedClip.offset = dragState.originalOffset + offsetShift;
-              } 
-              else if (dragState.interactionType === 'trim-end') {
-                  let newEnd = dragState.originalEnd + deltaTime;
-                  
-                  if (newEnd > clip.duration) newEnd = clip.duration; 
-                  if (newEnd < clip.start + 0.1) newEnd = clip.start + 0.1;
-
-                  updatedClip.end = newEnd;
+              // --- MARKER LOGIC ---
+              if (dragState.interactionType === 'move-in-marker') {
+                  let newIn = Math.max(0, dragState.originalOffset + deltaTime);
+                  // Constraint: In cannot be > Out
+                  if (project.outPoint !== null && newIn > project.outPoint) {
+                      newIn = project.outPoint;
+                  }
+                  onMarkerUpdate(newIn, project.outPoint);
+                  return;
+              }
+              
+              if (dragState.interactionType === 'move-out-marker') {
+                  let newOut = Math.max(0, dragState.originalOffset + deltaTime);
+                  // Constraint: Out cannot be < In
+                  if (project.inPoint !== null && newOut < project.inPoint) {
+                      newOut = project.inPoint;
+                  }
+                  onMarkerUpdate(project.inPoint, newOut);
+                  return;
               }
 
-              onClipUpdate(updatedClip);
+              // --- CLIP LOGIC ---
+              if (dragState.clipId) {
+                  const clip = project.clips.find(c => c.id === dragState.clipId);
+                  if (!clip) return;
+
+                  let updatedClip = { ...clip };
+
+                  if (dragState.interactionType === 'move') {
+                      const newOffset = Math.max(0, dragState.originalOffset + deltaTime);
+                      updatedClip.offset = newOffset;
+                  } 
+                  else if (dragState.interactionType === 'trim-start') {
+                      let newStart = dragState.originalStart + deltaTime;
+                      
+                      // Constrain
+                      if (newStart < 0) newStart = 0;
+                      if (newStart > dragState.originalEnd - 0.1) newStart = dragState.originalEnd - 0.1;
+
+                      const offsetShift = newStart - dragState.originalStart;
+                      
+                      updatedClip.start = newStart;
+                      updatedClip.offset = dragState.originalOffset + offsetShift;
+                  } 
+                  else if (dragState.interactionType === 'trim-end') {
+                      let newEnd = dragState.originalEnd + deltaTime;
+                      
+                      if (newEnd > clip.duration) newEnd = clip.duration; 
+                      if (newEnd < clip.start + 0.1) newEnd = clip.start + 0.1;
+
+                      updatedClip.end = newEnd;
+                  }
+
+                  onClipUpdate(updatedClip);
+              }
           }
       };
 
@@ -224,7 +283,7 @@ const Timeline: FC<TimelineProps> = ({ project, onSeek, onClipUpdate, onClipSele
           window.removeEventListener('touchend', handleGlobalUp);
           window.removeEventListener('touchcancel', handleGlobalUp);
       };
-  }, [dragState, isDraggingPlayhead, project.clips, pixelsPerSecond, onClipUpdate, onSeek]);
+  }, [dragState, isDraggingPlayhead, project.clips, project.inPoint, project.outPoint, pixelsPerSecond, onClipUpdate, onSeek, onMarkerUpdate]);
 
 
   // --- PLAYHEAD HANDLERS ---
@@ -257,7 +316,7 @@ const Timeline: FC<TimelineProps> = ({ project, onSeek, onClipUpdate, onClipSele
          >
             {/* Ruler / Playhead Track */}
             <div 
-                className="h-6 border-b border-gray-800 sticky top-0 bg-gray-900/90 z-20 cursor-pointer"
+                className="h-6 border-b border-gray-800 sticky top-0 bg-gray-900/90 z-20 cursor-pointer group/ruler"
                 onMouseDown={handleRulerMouseDown}
                 onTouchStart={handlePlayheadTouchStart}
             >
@@ -271,7 +330,63 @@ const Timeline: FC<TimelineProps> = ({ project, onSeek, onClipUpdate, onClipSele
                         {i * 5}s
                     </div>
                 ))}
+
+                {/* In/Out Marker Region (Ruler Highlight) */}
+                {project.inPoint !== null && project.outPoint !== null && (
+                    <div 
+                        className="absolute top-0 bottom-0 bg-blue-500/30 border-x border-blue-400 pointer-events-none"
+                        style={{ 
+                            left: project.inPoint * pixelsPerSecond,
+                            width: (project.outPoint - project.inPoint) * pixelsPerSecond
+                        }}
+                    >
+                    </div>
+                )}
+
+                {/* In Point Marker Icon - Draggable */}
+                {project.inPoint !== null && (
+                    <div 
+                         className="absolute top-0 bottom-0 border-l-2 border-blue-400 z-30 cursor-ew-resize group/marker"
+                         style={{ left: project.inPoint * pixelsPerSecond }}
+                         onMouseDown={(e) => handleMarkerMouseDown(e, 'in')}
+                         onTouchStart={(e) => handleMarkerTouchStart(e, 'in')}
+                    >
+                        {/* Hit Area */}
+                        <div className="absolute top-0 -left-3 w-6 h-full bg-transparent"></div>
+                        {/* Visual Icon */}
+                        <div className="text-[9px] text-blue-400 bg-gray-900 px-1 -ml-3 -mt-1 font-bold pointer-events-none">[</div>
+                    </div>
+                )}
+                
+                {/* Out Point Marker Icon - Draggable */}
+                {project.outPoint !== null && (
+                    <div 
+                         className="absolute top-0 bottom-0 border-r-2 border-blue-400 z-30 cursor-ew-resize group/marker"
+                         style={{ left: project.outPoint * pixelsPerSecond }}
+                         onMouseDown={(e) => handleMarkerMouseDown(e, 'out')}
+                         onTouchStart={(e) => handleMarkerTouchStart(e, 'out')}
+                    >
+                        {/* Hit Area */}
+                        <div className="absolute top-0 -right-3 w-6 h-full bg-transparent"></div>
+                        {/* Visual Icon */}
+                        <div className="text-[9px] text-blue-400 bg-gray-900 px-1 -ml-1 -mt-1 font-bold pointer-events-none">]</div>
+                    </div>
+                )}
             </div>
+            
+            {/* In/Out Vertical Lines across timeline */}
+            {project.inPoint !== null && (
+                <div 
+                    className="absolute top-6 bottom-0 w-px border-l border-dashed border-blue-500/30 pointer-events-none z-0"
+                    style={{ left: project.inPoint * pixelsPerSecond }}
+                />
+            )}
+            {project.outPoint !== null && (
+                <div 
+                    className="absolute top-6 bottom-0 w-px border-l border-dashed border-blue-500/30 pointer-events-none z-0"
+                    style={{ left: project.outPoint * pixelsPerSecond }}
+                />
+            )}
 
             {/* Tracks & Clips */}
             <div className="pt-2">

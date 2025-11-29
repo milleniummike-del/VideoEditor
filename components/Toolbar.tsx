@@ -1,3 +1,4 @@
+
 import { type FC } from 'react';
 import { ProjectState } from '../types';
 
@@ -10,6 +11,10 @@ interface ToolbarProps {
   onExport: () => void;
   onOpenProjectManager: () => void;
   isExporting: boolean;
+  onSetInPoint: () => void;
+  onSetOutPoint: () => void;
+  onClearMarkers: () => void;
+  onToggleLoop: () => void;
 }
 
 const Toolbar: FC<ToolbarProps> = ({ 
@@ -19,11 +24,16 @@ const Toolbar: FC<ToolbarProps> = ({
   onTogglePlay,
   onExport,
   onOpenProjectManager,
-  isExporting
+  isExporting,
+  onSetInPoint,
+  onSetOutPoint,
+  onClearMarkers,
+  onToggleLoop
 }) => {
   return (
     <div className="h-14 bg-gray-800 border-b border-gray-700 flex items-center px-4 justify-between">
       <div className="flex items-center space-x-4">
+        {/* Playback Controls */}
         <button 
           onClick={onTogglePlay}
           disabled={isExporting}
@@ -35,6 +45,45 @@ const Toolbar: FC<ToolbarProps> = ({
              <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
           )}
         </button>
+
+        <button 
+          onClick={onToggleLoop}
+          disabled={isExporting}
+          title="Toggle Loop Playback"
+          className={`p-2 rounded hover:bg-gray-700 transition-colors disabled:opacity-50 ${project.isLooping ? 'text-blue-400 bg-gray-900' : 'text-gray-400'}`}
+        >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+        </button>
+
+        <div className="h-6 w-px bg-gray-600 mx-2" />
+
+        {/* Marker Controls */}
+        <div className="flex bg-gray-700 rounded overflow-hidden">
+            <button 
+                onClick={onSetInPoint}
+                disabled={isExporting}
+                title="Set In Point (I)"
+                className="px-3 py-1.5 hover:bg-gray-600 text-xs font-mono text-gray-200 border-r border-gray-600 disabled:opacity-50"
+            >
+                [ In
+            </button>
+            <button 
+                onClick={onSetOutPoint}
+                disabled={isExporting}
+                title="Set Out Point (O)"
+                className="px-3 py-1.5 hover:bg-gray-600 text-xs font-mono text-gray-200 border-r border-gray-600 disabled:opacity-50"
+            >
+                Out ]
+            </button>
+            <button 
+                onClick={onClearMarkers}
+                disabled={isExporting}
+                title="Clear Markers (Shift+X)"
+                className="px-2 py-1.5 hover:bg-red-900/50 text-gray-400 hover:text-red-300 disabled:opacity-50"
+            >
+                ✕
+            </button>
+        </div>
 
         <div className="h-6 w-px bg-gray-600 mx-2" />
 

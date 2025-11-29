@@ -1,3 +1,4 @@
+
 import { useRef, useEffect, useState, useCallback, type FC } from 'react';
 import { Clip, ProjectState } from '../types';
 
@@ -489,6 +490,14 @@ const Player: FC<PlayerProps> = ({
             
             // Advance internal time reference
             internalTimeRef.current += dt * playbackSpeedRef.current;
+
+            // LOOP LOGIC
+            // If looping is enabled and we have valid in/out points
+            if (project.isLooping && project.inPoint !== null && project.outPoint !== null && !isExportingActive) {
+                if (internalTimeRef.current >= project.outPoint) {
+                    internalTimeRef.current = project.inPoint;
+                }
+            }
             
             // Sync Parent UI (Note: this is async and won't affect next frame calculation which uses internalTimeRef)
             onTimeUpdate(internalTimeRef.current);
@@ -523,7 +532,7 @@ const Player: FC<PlayerProps> = ({
     renderFrameLogic(internalTimeRef.current);
 
     requestRef.current = requestAnimationFrame(renderLoop);
-  }, [project.isPlaying, isExporting, exportEndTime, onTimeUpdate, renderFrameLogic, onExportFinish]);
+  }, [project.isPlaying, project.isLooping, project.inPoint, project.outPoint, isExporting, exportEndTime, onTimeUpdate, renderFrameLogic, onExportFinish]);
 
   // Start/Stop Loop
   useEffect(() => {
