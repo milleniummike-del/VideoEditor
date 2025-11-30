@@ -1,7 +1,8 @@
 
+
 import { useState, useCallback, useEffect, useMemo, useRef, type FC, type ChangeEvent } from 'react';
-import { ProjectState, Clip, LibraryClip } from './types';
-import { INITIAL_TRACKS, PIXELS_PER_SECOND_DEFAULT, RESOLUTIONS } from './constants';
+import { ProjectState, Clip, LibraryClip, TransitionType } from './types';
+import { INITIAL_TRACKS, PIXELS_PER_SECOND_DEFAULT, RESOLUTIONS, DEFAULT_FPS } from './constants';
 import Timeline from './components/Timeline';
 import Player from './components/Player';
 import Toolbar from './components/Toolbar';
@@ -10,41 +11,72 @@ import ProjectSettings from './components/ProjectSettings';
 import ClipProperties from './components/ClipProperties';
 import MediaLibrary from './components/MediaLibrary';
 import ExportModals from './components/ExportModals';
+import { saveMedia, getAllMedia, deleteMedia, StoredMedia } from './services/storage';
 
 const App: FC = () => {
   const [mediaUrl, setMediaUrl] = useState('');
   const [mediaType, setMediaType] = useState<'video' | 'audio'>('video');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [project, setProject] = useState<ProjectState>(() => {
-    // Migration: Check for old library data in localStorage
-    let initialLibrary: LibraryClip[] = [];
-    try {
-        const savedLib = localStorage.getItem('lumina_library');
-        if (savedLib) {
-            const parsed = JSON.parse(savedLib);
-            initialLibrary = parsed.map((c: any) => ({ ...c, type: c.type || 'video' }));
-        }
-    } catch (e) {
-        // ignore
-    }
+  // Persistence State: Map media IDs to current Blob URLs
+  const [mediaMap, setMediaMap] = useState<Map<string, string>>(new Map());
 
+  const [project, setProject] = useState<ProjectState>(() => {
     return {
         clips: [],
-        library: initialLibrary,
+        library: [],
         tracks: INITIAL_TRACKS,
         duration: 30, // Initial workspace duration
         currentTime: 0,
         isPlaying: false,
         isLooping: false,
-        inPoint: null,
-        outPoint: null,
         selectedClipId: null,
         zoom: PIXELS_PER_SECOND_DEFAULT,
         width: RESOLUTIONS[0].width,
         height: RESOLUTIONS[0].height,
+        fps: DEFAULT_FPS,
     };
   });
+
+  // Load Media from IndexedDB on startup
+  useEffect(() => {
+      const loadPersistedMedia = async () => {
+          try {
+              const storedFiles = await getAllMedia();
+              const newMediaMap = new Map<string, string>();
+              const libraryClips: LibraryClip[] = [];
+
+              storedFiles.forEach(file => {
+                  const url = URL.createObjectURL(file.blob);
+                  newMediaMap.set(file.id, url);
+                  libraryClips.push({
+                      id: file.id,
+                      name: file.name,
+                      type: file.type,
+                      duration: file.duration,
+                      url: url
+                  });
+              });
+
+              setMediaMap(newMediaMap);
+              
+              // Populate library initially
+              setProject(p => {
+                  // If we have existing clips (e.g. from local storage migration if we kept it), we might want to keep them
+                  // But here we prioritize the DB source of truth for the library list
+                  return {
+                      ...p,
+                      library: libraryClips
+                  };
+              });
+
+          } catch (e) {
+              console.error("Failed to load media from IndexedDB", e);
+          }
+      };
+
+      loadPersistedMedia();
+  }, []);
 
   // Export State
   const [isExporting, setIsExporting] = useState(false);
@@ -61,13 +93,32 @@ const App: FC = () => {
 
   const handleTimeUpdate = useCallback((time: number) => {
     setProject(p => {
-        // If exporting, use exportSettings.end
-        const endTime = isExporting ? exportSettings.end : p.duration;
-
-        // Stop at end
-        if (time >= endTime) {
-            return { ...p, currentTime: endTime, isPlaying: false };
+        if (isExporting) {
+            const endTime = exportSettings.end;
+            // Stop at end of export range
+            if (time >= endTime) {
+                return { ...p, currentTime: endTime, isPlaying: false };
+            }
+            return { ...p, currentTime: time };
         }
+
+        // Calculate actual end of content (last clip end)
+        const contentDuration = p.clips.reduce((max, c) => Math.max(max, c.offset + (c.end - c.start)), 0);
+        
+        // If looping is enabled, we rely on Player to handle the loop jump (or just keep playing)
+        // We only update time here.
+        if (p.isLooping) {
+            return { ...p, currentTime: time };
+        }
+
+        // If NOT looping, stop exactly at the end of the last clip
+        // Fallback to p.duration if empty (though p.duration includes padding, usually 30s min)
+        const stopTime = contentDuration > 0 ? contentDuration : p.duration;
+
+        if (time >= stopTime) {
+            return { ...p, currentTime: stopTime, isPlaying: false };
+        }
+
         return { ...p, currentTime: time };
     });
   }, [isExporting, exportSettings.end]);
@@ -82,42 +133,9 @@ const App: FC = () => {
     setProject(p => ({ ...p, isPlaying: !p.isPlaying }));
   }, [isExporting]);
 
-  // Marker Handlers
-  const handleSetInPoint = () => {
-      setProject(p => {
-          let newIn = p.currentTime;
-          // Ensure In is before Out
-          if (p.outPoint !== null && newIn >= p.outPoint) {
-              return { ...p, inPoint: newIn, outPoint: null };
-          }
-          return { ...p, inPoint: newIn };
-      });
-  };
-
-  const handleSetOutPoint = () => {
-      setProject(p => {
-          let newOut = p.currentTime;
-          // Ensure Out is after In
-          if (p.inPoint !== null && newOut <= p.inPoint) {
-              // If dragging backwards, maybe swap? simpler to just prevent or clear In
-              return { ...p, outPoint: newOut, inPoint: null };
-          }
-          return { ...p, outPoint: newOut };
-      });
-  };
-
-  const handleClearMarkers = () => {
-      setProject(p => ({ ...p, inPoint: null, outPoint: null }));
-  };
-  
-  const handleMarkerUpdate = (inPoint: number | null, outPoint: number | null) => {
-      setProject(p => ({ ...p, inPoint, outPoint }));
-  };
-
   const handleToggleLoop = () => {
       setProject(p => ({ ...p, isLooping: !p.isLooping }));
   };
-
 
   // Global Keyboard Shortcuts
   useEffect(() => {
@@ -131,12 +149,6 @@ const App: FC = () => {
       if (e.code === 'Space') {
         e.preventDefault(); // Prevent page scrolling
         handleTogglePlay();
-      } else if (e.key.toLowerCase() === 'i') {
-          handleSetInPoint();
-      } else if (e.key.toLowerCase() === 'o') {
-          handleSetOutPoint();
-      } else if (e.shiftKey && e.key.toLowerCase() === 'x') {
-          handleClearMarkers();
       }
     };
 
@@ -148,65 +160,111 @@ const App: FC = () => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const objectUrl = URL.createObjectURL(file);
-    
-    // Robust Type Detection
-    // 1. Check mime type
-    // 2. Fallback to extension
+    // Determine type
     let detectedType: 'video' | 'audio' = 'video';
-    
-    if (file.type.startsWith('audio/')) {
-        detectedType = 'audio';
-    } else if (file.type.startsWith('video/')) {
-        detectedType = 'video';
-    } else {
+    if (file.type.startsWith('audio/')) detectedType = 'audio';
+    else if (file.type.startsWith('video/')) detectedType = 'video';
+    else {
         const ext = file.name.split('.').pop()?.toLowerCase();
-        if (['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext || '')) {
-            detectedType = 'audio';
-        } else {
-            // Default to mediaType tab context if completely unknown, or default to video
-            detectedType = mediaType;
-        }
+        if (['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext || '')) detectedType = 'audio';
+        else detectedType = mediaType;
     }
 
-    const type = detectedType; 
-    
+    // 1. Get Duration using temp element
+    const objectUrl = URL.createObjectURL(file);
     let tempMedia: HTMLVideoElement | HTMLAudioElement;
-    if (type === 'video') {
-        tempMedia = document.createElement('video');
-    } else {
-        tempMedia = document.createElement('audio');
-    }
+    if (detectedType === 'video') tempMedia = document.createElement('video');
+    else tempMedia = document.createElement('audio');
     
     tempMedia.src = objectUrl;
     tempMedia.preload = 'metadata';
     
-    tempMedia.onloadedmetadata = () => {
-        const duration = tempMedia.duration;
-         const newClip: LibraryClip = {
+    tempMedia.onloadedmetadata = async () => {
+        const duration = tempMedia.duration || 10;
+        const id = crypto.randomUUID();
+
+        // 2. Save to IndexedDB
+        const storedMedia: StoredMedia = {
+            id,
             name: file.name,
-            url: objectUrl,
-            duration: duration || 10,
-            type: type
+            type: detectedType,
+            blob: file,
+            duration,
+            date: Date.now()
         };
-        setProject(p => ({ ...p, library: [...p.library, newClip] }));
-        tempMedia.remove();
+
+        try {
+            await saveMedia(storedMedia);
+            
+            // 3. Update State
+            const newClip: LibraryClip = {
+                id,
+                name: file.name,
+                url: objectUrl, // This URL is valid for current session
+                duration,
+                type: detectedType
+            };
+            
+            // Update map for consistency
+            setMediaMap(prev => new Map(prev).set(id, objectUrl));
+            
+            setProject(p => {
+                // Add to library
+                const updatedLibrary = [...p.library, newClip];
+                
+                // Also Add to Timeline immediately
+                const targetTrack = p.tracks.find(t => t.type === newClip.type);
+                let updatedClips = p.clips;
+                let updatedDuration = p.duration;
+                let updatedCurrentTime = p.currentTime;
+
+                if (targetTrack) {
+                    const timelineClip: Clip = {
+                        id: crypto.randomUUID(),
+                        name: newClip.name,
+                        url: newClip.url,
+                        duration: newClip.duration,
+                        start: 0,
+                        end: newClip.duration,
+                        offset: p.currentTime,
+                        track: targetTrack.id,
+                        type: newClip.type,
+                        fadeIn: 0,
+                        fadeOut: 0,
+                        mediaLibraryId: newClip.id
+                    };
+                    updatedClips = [...updatedClips, timelineClip];
+                    const newEndTime = timelineClip.offset + timelineClip.duration;
+                    updatedDuration = Math.max(p.duration, newEndTime + 10);
+                    updatedCurrentTime = newEndTime;
+                }
+
+                return { 
+                    ...p, 
+                    library: updatedLibrary,
+                    clips: updatedClips,
+                    duration: updatedDuration,
+                    currentTime: updatedCurrentTime
+                };
+            });
+            
+            if (fileInputRef.current) fileInputRef.current.value = '';
+        } catch (err) {
+            console.error("Failed to save to DB", err);
+            alert("Failed to save file to storage. Quota might be exceeded.");
+        }
         
-        // Reset input so same file can be selected again
-        if (fileInputRef.current) fileInputRef.current.value = '';
+        tempMedia.remove();
     };
 
-    tempMedia.onerror = (e) => {
-        console.error("File load error", e);
-        alert(`Failed to load file "${file.name}". The format might not be supported.`);
+    tempMedia.onerror = () => {
+        alert("Failed to load file media.");
         tempMedia.remove();
-        if (fileInputRef.current) fileInputRef.current.value = '';
     };
   };
 
   const handleAddMedia = () => {
     if (!mediaUrl.trim()) return;
-    
     const url = mediaUrl.trim();
     
     // Create temp element to check duration and validity
@@ -217,48 +275,97 @@ const App: FC = () => {
         tempMedia = document.createElement('audio');
     }
     
-    // IMPORTANT: Set crossOrigin BEFORE src to ensure correct CORS request
     tempMedia.crossOrigin = "anonymous";
     
     const handleSuccess = () => {
         const duration = tempMedia.duration;
         if (duration && !isNaN(duration) && duration !== Infinity) {
              const newClip: LibraryClip = {
+                id: crypto.randomUUID(), // Transient ID
                 name: `${mediaType === 'video' ? 'Video' : 'Audio'} ${project.library.length + 1}`,
                 url: tempMedia.src,
                 duration: duration, 
                 type: mediaType
             };
-            setProject(p => ({ ...p, library: [...p.library, newClip] }));
+
+            setProject(p => {
+                const updatedLibrary = [...p.library, newClip];
+
+                // Also Add to Timeline immediately
+                const targetTrack = p.tracks.find(t => t.type === newClip.type);
+                let updatedClips = p.clips;
+                let updatedDuration = p.duration;
+                let updatedCurrentTime = p.currentTime;
+
+                if (targetTrack) {
+                    const timelineClip: Clip = {
+                        id: crypto.randomUUID(),
+                        name: newClip.name,
+                        url: newClip.url,
+                        duration: newClip.duration,
+                        start: 0,
+                        end: newClip.duration,
+                        offset: p.currentTime,
+                        track: targetTrack.id,
+                        type: newClip.type,
+                        fadeIn: 0,
+                        fadeOut: 0,
+                        mediaLibraryId: newClip.id
+                    };
+                    updatedClips = [...updatedClips, timelineClip];
+                    const newEndTime = timelineClip.offset + timelineClip.duration;
+                    updatedDuration = Math.max(p.duration, newEndTime + 10);
+                    updatedCurrentTime = newEndTime;
+                }
+
+                return { 
+                    ...p, 
+                    library: updatedLibrary,
+                    clips: updatedClips,
+                    duration: updatedDuration,
+                    currentTime: updatedCurrentTime
+                };
+            });
             setMediaUrl('');
         } else {
-            alert(`Could not determine ${mediaType} duration. The format might not be supported.`);
+            alert(`Could not determine ${mediaType} duration.`);
         }
         tempMedia.remove();
     };
 
     const handleError = () => {
-        // If the src is not already using the proxy, try the proxy
         if (!tempMedia.src.includes('corsproxy.io')) {
-            console.log("Direct load failed, attempting CORS proxy...");
-            // Use a public CORS proxy to bypass headers issue
-            // We use encodeURIComponent to ensure special chars in URL are handled
             tempMedia.src = `https://corsproxy.io/?${encodeURIComponent(url)}`;
         } else {
-            // Already tried proxy and failed
-            alert("Failed to load media. The resource likely restricts access or does not support CORS even via proxy.");
+            alert("Failed to load media. CORS restricted.");
             tempMedia.remove();
         }
     };
 
     tempMedia.onloadedmetadata = handleSuccess;
     tempMedia.onerror = handleError;
-    
-    // Initial attempt: Direct URL
     tempMedia.src = url;
   };
 
-  const handleDeleteFromLibrary = (index: number) => {
+  const handleDeleteFromLibrary = async (index: number) => {
+      const clip = project.library[index];
+      
+      // If it has an ID that exists in our mediaMap, it's a DB file
+      if (mediaMap.has(clip.id)) {
+          try {
+              await deleteMedia(clip.id);
+              // Revoke URL
+              URL.revokeObjectURL(clip.url);
+              setMediaMap(prev => {
+                  const next = new Map(prev);
+                  next.delete(clip.id);
+                  return next;
+              });
+          } catch (e) {
+              console.error("Failed to delete from DB", e);
+          }
+      }
+
       setProject(p => ({
           ...p,
           library: p.library.filter((_, i) => i !== index)
@@ -267,9 +374,6 @@ const App: FC = () => {
 
   const handleAddClip = (index: number) => {
     const stock = project.library[index];
-    
-    // Find appropriate track based on type
-    // If Video, find video track. If Audio, find audio track.
     const targetTrack = project.tracks.find(t => t.type === stock.type);
     
     if (!targetTrack) {
@@ -284,11 +388,12 @@ const App: FC = () => {
       duration: stock.duration,
       start: 0,
       end: stock.duration,
-      offset: project.currentTime, // Add at playhead
+      offset: project.currentTime,
       track: targetTrack.id,
       type: stock.type,
       fadeIn: 0,
-      fadeOut: 0
+      fadeOut: 0,
+      mediaLibraryId: stock.id // Link for persistence
     };
     
     const newEndTime = newClip.offset + newClip.duration;
@@ -302,7 +407,6 @@ const App: FC = () => {
   };
 
   const handleAddTextClip = () => {
-    // Robustly find or create the text track
     setProject(p => {
         let tracks = [...p.tracks];
         let textTrack = tracks.find(t => t.type === 'text');
@@ -313,7 +417,6 @@ const App: FC = () => {
                  textTrack = defaultTextTrack;
                  tracks.push(textTrack);
              } else {
-                 // Fallback if constants are missing it for some reason
                  return p; 
              }
         }
@@ -357,12 +460,11 @@ const App: FC = () => {
     }));
   };
 
-  const handleApplyTransition = (type: 'cut' | 'dissolve') => {
+  const handleApplyTransition = (type: TransitionType | 'cut') => {
       if (!project.selectedClipId) return;
       const currentClip = project.clips.find(c => c.id === project.selectedClipId);
       if (!currentClip) return;
 
-      // Find previous clip on same track
       const sortedTrackClips = project.clips
           .filter(c => c.track === currentClip.track && c.id !== currentClip.id)
           .sort((a, b) => a.offset - b.offset);
@@ -370,35 +472,37 @@ const App: FC = () => {
       const prevClip = sortedTrackClips.filter(c => c.offset < currentClip.offset).pop();
 
       if (!prevClip) {
-          // If no previous clip, we can still set fade in/out but no overlap
-          if (type === 'dissolve') {
-              handleUpdateClip({ ...currentClip, fadeIn: transitionDuration });
+          if (type !== 'cut') {
+              handleUpdateClip({ 
+                  ...currentClip, 
+                  transition: { type, duration: transitionDuration },
+                  fadeIn: 0 
+              });
           } else {
-              handleUpdateClip({ ...currentClip, fadeIn: 0 });
+              handleUpdateClip({ 
+                  ...currentClip, 
+                  transition: undefined,
+                  fadeIn: 0 
+              });
           }
           return;
       }
 
       let updatedCurrent = { ...currentClip };
-      let updatedPrev = { ...prevClip }; // We might modify prev clip too? Usually only next.
 
-      if (type === 'dissolve') {
-          // AUTO OVERLAP LOGIC
-          // 1. Calculate desired start point for current clip: PrevClip.End - Duration
+      if (type !== 'cut') {
           const prevClipEnd = prevClip.offset + (prevClip.end - prevClip.start);
           const desiredOffset = prevClipEnd - transitionDuration;
-          
-          if (desiredOffset < 0) return; // Can't move before start
+          if (desiredOffset < 0) return; 
 
-          // 2. Move current clip to overlap
           updatedCurrent.offset = desiredOffset;
-          updatedCurrent.fadeIn = transitionDuration;
+          updatedCurrent.transition = { type, duration: transitionDuration };
+          updatedCurrent.fadeIn = 0; 
           
-          // Optional: Extend prev clip? No, assuming prev clip is long enough or we just overlap what exists.
       } else {
-          // CUT: Remove Fade, Snap to end of prev clip (remove overlap)
           const prevClipEnd = prevClip.offset + (prevClip.end - prevClip.start);
           updatedCurrent.offset = prevClipEnd;
+          updatedCurrent.transition = undefined;
           updatedCurrent.fadeIn = 0;
       }
 
@@ -406,7 +510,6 @@ const App: FC = () => {
           ...p,
           clips: p.clips.map(c => {
               if (c.id === updatedCurrent.id) return updatedCurrent;
-              // if (c.id === updatedPrev.id) return updatedPrev;
               return c;
           })
       }));
@@ -421,14 +524,12 @@ const App: FC = () => {
     const clip = project.clips.find(c => c.id === project.selectedClipId);
     if (!clip) return;
 
-    // Check if playhead is inside clip
     const relativeTime = project.currentTime - clip.offset;
     if (relativeTime <= 0 || relativeTime >= (clip.end - clip.start)) {
         alert("Playhead must be inside the selected clip to split.");
         return;
     }
 
-    // Split point in source media time
     const splitPointSource = clip.start + relativeTime;
 
     const leftClip: Clip = {
@@ -442,7 +543,8 @@ const App: FC = () => {
         start: splitPointSource,
         end: clip.end,
         offset: project.currentTime,
-        fadeIn: 0 // Reset fade for new split part
+        fadeIn: 0,
+        transition: undefined
     };
 
     setProject(p => ({
@@ -462,25 +564,12 @@ const App: FC = () => {
   };
 
   const handleExportClick = () => {
-    // Calculate content bounds
     const maxContentTime = project.clips.reduce((max, clip) => Math.max(max, clip.offset + (clip.end - clip.start)), 0);
-    
-    // Default to In/Out points if set, otherwise max content
-    let start = 0;
-    let end = maxContentTime;
-    
-    if (project.inPoint !== null) start = project.inPoint;
-    if (project.outPoint !== null && project.outPoint > start) end = project.outPoint;
-    
-    if (maxContentTime === 0 && (project.inPoint === null || project.outPoint === null)) {
+    if (maxContentTime === 0) {
         alert("Timeline is empty.");
         return;
     }
-
-    setExportSettings({
-        start: start,
-        end: end
-    });
+    setExportSettings({ start: 0, end: maxContentTime });
     setExportUrl(null);
     setExportMimeType('');
     setShowExportModal(true);
@@ -488,8 +577,6 @@ const App: FC = () => {
 
   const startExport = () => {
     setShowExportModal(false);
-    // Set up project for export: Start at beginning, but DO NOT play yet. 
-    // Player will handle internal playback sync with recorder.
     setProject(p => ({ ...p, currentTime: exportSettings.start, isPlaying: false }));
     setIsExporting(true);
   };
@@ -505,26 +592,18 @@ const App: FC = () => {
 
   const downloadExportedVideo = () => {
       if (!exportUrl) return;
-      
       const a = document.createElement('a');
       a.style.display = 'none';
       a.href = exportUrl;
-      
-      // Smart extension handling
       let extension = 'webm';
-      if (exportMimeType.includes('mp4')) {
-          extension = 'mp4';
-      } else if (exportMimeType.includes('webm')) {
-          extension = 'webm';
-      }
-      
+      if (exportMimeType.includes('mp4')) extension = 'mp4';
+      else if (exportMimeType.includes('webm')) extension = 'webm';
       a.download = `lumina_export_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.${extension}`;
       document.body.appendChild(a);
       a.click();
       setTimeout(() => {
           document.body.removeChild(a);
           setExportUrl(null);
-          // Revoke URL to free memory, but only after we are sure user clicked
           URL.revokeObjectURL(exportUrl);
       }, 100);
   };
@@ -532,66 +611,71 @@ const App: FC = () => {
   const handleResolutionChange = (e: ChangeEvent<HTMLSelectElement>) => {
       const selected = RESOLUTIONS.find(r => r.name === e.target.value);
       if (selected) {
-          setProject(p => ({
-              ...p,
-              width: selected.width,
-              height: selected.height
-          }));
+          setProject(p => ({ ...p, width: selected.width, height: selected.height }));
+      }
+  };
+
+  const handleFpsChange = (e: ChangeEvent<HTMLSelectElement>) => {
+      const fps = parseInt(e.target.value, 10);
+      if (!isNaN(fps)) {
+          setProject(p => ({ ...p, fps }));
       }
   };
 
   const handleLoadProject = (loadedProject: ProjectState) => {
-    // If the project object is null or undefined (e.g. cancelled load), do nothing
     if (!loadedProject) return;
+
+    // Revitalize Blob URLs from mediaMap
+    const restoredClips = (loadedProject.clips || []).map(c => {
+        if (c.mediaLibraryId && mediaMap.has(c.mediaLibraryId)) {
+            return { ...c, url: mediaMap.get(c.mediaLibraryId)! };
+        }
+        return c;
+    });
+
+    const restoredLibrary = (loadedProject.library || []).map(l => {
+        if (l.id && mediaMap.has(l.id)) {
+            return { ...l, url: mediaMap.get(l.id)! };
+        }
+        return l;
+    });
 
     // Ensure tracks array exists
     let tracks = Array.isArray(loadedProject.tracks) ? loadedProject.tracks : INITIAL_TRACKS;
-
-    // Migration: Ensure Text Track exists if loading old project
     if (!tracks.find(t => t.type === 'text')) {
         const defaultTextTrack = INITIAL_TRACKS.find(t => t.type === 'text');
-        if (defaultTextTrack) {
-            tracks = [...tracks, defaultTextTrack];
-        }
+        if (defaultTextTrack) tracks = [...tracks, defaultTextTrack];
     }
 
-    // Sanitize and default missing fields to prevent crashes with old/malformed JSONs
-    // Create a new object to ensure state update triggers
     const safeProject: ProjectState = {
         name: loadedProject.name || "Imported Project",
-        library: Array.isArray(loadedProject.library) ? loadedProject.library : [],
-        clips: Array.isArray(loadedProject.clips) ? loadedProject.clips : [],
+        library: restoredLibrary,
+        clips: restoredClips,
         tracks: tracks,
         duration: typeof loadedProject.duration === 'number' ? loadedProject.duration : 30,
         currentTime: 0,
         isPlaying: false,
         isLooping: !!loadedProject.isLooping,
-        inPoint: typeof loadedProject.inPoint === 'number' ? loadedProject.inPoint : null,
-        outPoint: typeof loadedProject.outPoint === 'number' ? loadedProject.outPoint : null,
         selectedClipId: null,
         zoom: loadedProject.zoom || PIXELS_PER_SECOND_DEFAULT,
         width: loadedProject.width || RESOLUTIONS[0].width,
         height: loadedProject.height || RESOLUTIONS[0].height,
+        fps: loadedProject.fps || DEFAULT_FPS,
     };
 
     setProject(safeProject);
   };
 
-  // Calculate player display dimensions to fit within a container while maintaining aspect ratio
   const playerDimensions = useMemo(() => {
       const maxWidth = 800;
       const maxHeight = 500;
-      
       const aspect = project.width / project.height;
-      
       let w = maxWidth;
       let h = w / aspect;
-      
       if (h > maxHeight) {
           h = maxHeight;
           w = h * aspect;
       }
-      
       return { width: w, height: h };
   }, [project.width, project.height]);
 
@@ -601,7 +685,6 @@ const App: FC = () => {
 
   return (
     <div className="flex flex-col h-[100dvh] bg-gray-950 text-white font-sans">
-      {/* Header / Toolbar */}
       <Toolbar 
         project={project}
         onAddClip={() => {}} 
@@ -611,22 +694,17 @@ const App: FC = () => {
         onExport={handleExportClick}
         onOpenProjectManager={() => setShowProjectManager(true)}
         isExporting={isExporting}
-        onSetInPoint={handleSetInPoint}
-        onSetOutPoint={handleSetOutPoint}
-        onClearMarkers={handleClearMarkers}
         onToggleLoop={handleToggleLoop}
         onAddText={handleAddTextClip}
       />
 
       <div className="flex-1 flex overflow-hidden relative">
-        {/* Sidebar / Media Library */}
         <div className="w-64 bg-gray-900 border-r border-gray-800 p-4 flex flex-col overflow-y-auto custom-scrollbar">
-           
            <ProjectSettings 
                 project={project} 
-                onResolutionChange={handleResolutionChange} 
+                onResolutionChange={handleResolutionChange}
+                onFpsChange={handleFpsChange}
            />
-
            <ClipProperties 
                 selectedClip={selectedClip}
                 onUpdateClip={handleUpdateClip}
@@ -634,7 +712,6 @@ const App: FC = () => {
                 setTransitionDuration={setTransitionDuration}
                 onApplyTransition={handleApplyTransition}
            />
-
            <MediaLibrary 
                 project={project}
                 mediaUrl={mediaUrl}
@@ -647,12 +724,9 @@ const App: FC = () => {
                 onAddClip={handleAddClip}
                 onDeleteFromLibrary={handleDeleteFromLibrary}
            />
-           
         </div>
 
-        {/* Main Content Area */}
         <div className="flex-1 flex flex-col min-w-0">
-            {/* Player Preview */}
             <div className="flex-1 bg-gray-950 flex items-center justify-center p-8 relative overflow-hidden">
                 <Player 
                     project={project} 
@@ -666,20 +740,17 @@ const App: FC = () => {
                     onClipUpdate={handleUpdateClip}
                 />
                 
-                {/* Export Overlay */}
                 {isExporting && (
                     <div className="absolute inset-0 bg-black/80 flex items-center justify-center z-50">
                         <div className="text-center">
                             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
                             <h3 className="text-xl font-bold">Rendering & Recording...</h3>
                             <p className="text-gray-400">Please wait while we generate your video.</p>
-                            <p className="text-gray-500 text-sm mt-2">Do not switch tabs.</p>
                         </div>
                     </div>
                 )}
             </div>
 
-            {/* Timeline */}
             <div className="h-64 flex flex-col border-t border-gray-800">
                 <div className="h-8 bg-gray-900 border-b border-gray-800 flex items-center px-4 justify-between">
                     <span className="text-xs text-gray-500">Timeline</span>
@@ -693,12 +764,10 @@ const App: FC = () => {
                     onSeek={handleSeek}
                     onClipUpdate={handleUpdateClip}
                     onClipSelect={handleSelectClip}
-                    onMarkerUpdate={handleMarkerUpdate}
                 />
             </div>
         </div>
 
-        {/* Project Manager Modal */}
         <ProjectManager 
             isOpen={showProjectManager} 
             onClose={() => setShowProjectManager(false)} 

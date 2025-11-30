@@ -1,5 +1,4 @@
-
-import { useRef, useEffect, useState, useCallback, useMemo, type FC } from 'react';
+import React, { useRef, useEffect, useState, useCallback, useMemo, type FC } from 'react';
 import { Clip, ProjectState } from '../types';
 
 interface PlayerProps {
@@ -25,6 +24,7 @@ const Player: FC<PlayerProps> = ({
   onClipUpdate
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const hiddenContainerRef = useRef<HTMLDivElement>(null); // Container for off-screen media elements
   
   // Media Elements - Keyed by Clip ID to ensure unique elements per clip on timeline
   const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
@@ -41,6 +41,11 @@ const Player: FC<PlayerProps> = ({
   
   // Timing refs for smooth playback
   const lastTimeRef = useRef<number | null>(null);
+  // Throttling for FPS (Used mainly for Export)
+  const lastRenderTimeRef = useRef<number>(0);
+  // Throttling for UI Updates (prevent React render spam)
+  const lastUiUpdateRef = useRef<number>(0);
+
   // Independent time tracker to decouple render loop from React state updates
   const internalTimeRef = useRef<number>(0); 
   const playbackSpeedRef = useRef<number>(1);
@@ -99,7 +104,8 @@ const Player: FC<PlayerProps> = ({
   useEffect(() => {
     const actx = audioContextRef.current;
     const dest = audioDestinationRef.current;
-    if (!actx || !dest) return;
+    const container = hiddenContainerRef.current;
+    if (!actx || !dest || !container) return;
 
     const currentClipIds = new Set(project.clips.map(c => c.id));
 
@@ -108,6 +114,7 @@ const Player: FC<PlayerProps> = ({
         if (!currentClipIds.has(id)) {
             video.pause();
             video.src = "";
+            video.remove(); // Remove from DOM
             videoRefs.current.delete(id);
             // Also disconnect audio source if exists
             const source = sourceNodesRef.current.get(id);
@@ -126,6 +133,7 @@ const Player: FC<PlayerProps> = ({
         if (!currentClipIds.has(id)) {
             audio.pause();
             audio.src = "";
+            audio.remove(); // Remove from DOM
             audioRefs.current.delete(id);
             const source = sourceNodesRef.current.get(id);
             const gain = gainNodesRef.current.get(id);
@@ -151,6 +159,19 @@ const Player: FC<PlayerProps> = ({
             video.muted = false; // We use WebAudio to capture it
             video.playsInline = true; // Critical for iOS
             
+            // Force browser to render this video element by making it visible but off-screen
+            // This prevents "judder" caused by browser optimizing out hidden videos
+            video.style.position = 'absolute';
+            video.style.top = '0';
+            video.style.left = '0';
+            video.style.width = '100%';
+            video.style.height = '100%';
+            video.style.opacity = '0.01'; // Not 0 to ensure it's "visible"
+            video.disablePictureInPicture = true;
+            
+            // Critical: Append to DOM to ensure browser decodes frames for canvas
+            container.appendChild(video);
+
             video.onloadedmetadata = () => {
                 setIsMediaLoaded(prev => !prev);
             };
@@ -185,6 +206,12 @@ const Player: FC<PlayerProps> = ({
             audio.crossOrigin = "anonymous"; // Set before src
             audio.src = clip.url;
             audio.preload = "auto";
+            
+            // Similar visibility hack for audio just in case
+            audio.style.position = 'absolute';
+            audio.style.opacity = '0.01';
+
+            container.appendChild(audio);
             
             audio.onloadedmetadata = () => {
                 setIsMediaLoaded(prev => !prev);
@@ -233,7 +260,7 @@ const Player: FC<PlayerProps> = ({
   // Main Render Loop Function (Defined before use)
   const renderFrameLogic = useCallback((currentTime: number) => {
     const canvas = canvasRef.current;
-    const ctx = canvas?.getContext('2d');
+    const ctx = canvas?.getContext('2d', { alpha: false, desynchronized: true });
     if (!canvas || !ctx) return;
 
     // Use Project Resolution
@@ -250,6 +277,22 @@ const Player: FC<PlayerProps> = ({
         currentTime < clip.offset + (clip.end - clip.start)
     );
 
+    const activeClipIds = new Set(activeClips.map(c => c.id));
+    const isRunning = project.isPlaying || isInternalExporting.current;
+
+    // --- Performance Optimization: Pause Inactive Media ---
+    // If we don't pause inactive clips, the browser tries to decode everything simultaneously, causing stutter.
+    videoRefs.current.forEach((video, id) => {
+        if (!activeClipIds.has(id)) {
+            if (!video.paused) video.pause();
+        }
+    });
+    audioRefs.current.forEach((audio, id) => {
+        if (!activeClipIds.has(id)) {
+            if (!audio.paused) audio.pause();
+        }
+    });
+
     // 1. Handle Audio & Video Sync for ALL active clips
     activeClips.forEach(clip => {
         let mediaEl: HTMLMediaElement | undefined;
@@ -263,39 +306,65 @@ const Player: FC<PlayerProps> = ({
         if (mediaEl && (mediaEl.readyState >= 2 || clip.type === 'audio')) { 
              const clipTime = (currentTime - clip.offset) + clip.start;
              
-             // Sync Check - Only sync if playing or exporting
-             const isRunning = project.isPlaying || isInternalExporting.current;
-             
-             if (isRunning && Math.abs(mediaEl.currentTime - clipTime) > 0.25) {
-                 mediaEl.currentTime = clipTime;
-             } else if (!isRunning) {
-                 // Scrubbing
-                 mediaEl.currentTime = clipTime;
+             if (isRunning) {
+                 // Play Mode
+                 
+                 // Sync Check
+                 const drift = mediaEl.currentTime - clipTime;
+                 const isSeeking = mediaEl.seeking; // Crucial check to prevent seek loops
+
+                 // Relaxed Tolerance: 0.5s.
+                 // If the video is within 0.5s of the timeline, let it play naturally.
+                 // Forcing seeks (mediaEl.currentTime = ...) causes visual stutter and audio gaps.
+                 if (!isSeeking && Math.abs(drift) > 0.5) {
+                     // Only seek if we are significantly off track
+                     mediaEl.currentTime = clipTime;
+                 }
+                 
+                 // Resume if paused
+                 if (mediaEl.paused) {
+                     // If we are resuming from a pause, ensure we are close enough
+                     // If we are just slightly off (e.g. 0.1s), don't force a seek, just play.
+                     if (Math.abs(drift) > 0.15) {
+                         mediaEl.currentTime = clipTime;
+                     }
+                     
+                     const playPromise = mediaEl.play();
+                     if (playPromise !== undefined) {
+                         playPromise.catch(() => {
+                             // Ignore auto-play interruptions
+                         });
+                     }
+                 }
+             } else {
+                 // Scrub Mode
+                 if (!mediaEl.paused) mediaEl.pause();
+                 
+                 // In scrub mode, we want exact frames, but we throttle 'seeking' if possible?
+                 // Actually, for scrubbing, we just set currentTime.
+                 // To prevent jitter, we can check if it's already close
+                 if (Math.abs(mediaEl.currentTime - clipTime) > 0.05) {
+                     mediaEl.currentTime = clipTime;
+                 }
              }
 
-             // Play/Pause
-             if (isRunning && mediaEl.paused) {
-                 mediaEl.play().catch(e => {
-                     // Auto-play policy error or interrupt
-                 }); 
-             } else if (!isRunning && !mediaEl.paused) {
-                 mediaEl.pause();
-             }
-
-             // End of clip check
+             // End of clip check (Local check to ensure no overshoot)
              if (clipTime >= clip.duration) {
-                 mediaEl.pause();
+                 if (!mediaEl.paused) mediaEl.pause();
              }
 
-             // Handle Fading (Audio Volume & Visual Opacity calculation)
+             // Handle Fading (Audio Volume)
              const gainNode = gainNodesRef.current.get(clip.id);
              let alpha = 1;
              
              const relativeTime = currentTime - clip.offset;
              const remainingTime = (clip.offset + (clip.end - clip.start)) - currentTime;
 
-             if (clip.fadeIn && clip.fadeIn > 0 && relativeTime < clip.fadeIn) {
-                 alpha = relativeTime / clip.fadeIn;
+             // Prioritize explicit transition duration if exists for entry, otherwise fade
+             const entryDuration = clip.transition ? clip.transition.duration : (clip.fadeIn || 0);
+
+             if (entryDuration > 0 && relativeTime < entryDuration) {
+                 alpha = relativeTime / entryDuration;
              } else if (clip.fadeOut && clip.fadeOut > 0 && remainingTime < clip.fadeOut) {
                  alpha = remainingTime / clip.fadeOut;
              }
@@ -304,7 +373,7 @@ const Player: FC<PlayerProps> = ({
                  gainNode.gain.value = alpha; 
              }
              
-             // Store alpha for video drawing
+             // Store alpha for video drawing (if basic fade)
              (clip as any)._renderAlpha = alpha; 
         } else if (clip.type === 'text') {
              // Logic for text clips (Just fade calculation)
@@ -312,8 +381,10 @@ const Player: FC<PlayerProps> = ({
              const relativeTime = currentTime - clip.offset;
              const remainingTime = (clip.offset + (clip.end - clip.start)) - currentTime;
 
-             if (clip.fadeIn && clip.fadeIn > 0 && relativeTime < clip.fadeIn) {
-                 alpha = relativeTime / clip.fadeIn;
+             const entryDuration = clip.transition ? clip.transition.duration : (clip.fadeIn || 0);
+
+             if (entryDuration > 0 && relativeTime < entryDuration) {
+                 alpha = relativeTime / entryDuration;
              } else if (clip.fadeOut && clip.fadeOut > 0 && remainingTime < clip.fadeOut) {
                  alpha = remainingTime / clip.fadeOut;
              }
@@ -350,13 +421,55 @@ const Player: FC<PlayerProps> = ({
                     offsetX = (canvasWidth - drawW) / 2;
                 }
                 
-                // Apply Fade Opacity
-                const alpha = (clip as any)._renderAlpha !== undefined ? (clip as any)._renderAlpha : 1;
-                ctx.globalAlpha = alpha;
+                ctx.save();
+
+                // Apply Transition Effects
+                const relativeTime = currentTime - clip.offset;
+                if (clip.transition && relativeTime < clip.transition.duration) {
+                    const p = relativeTime / clip.transition.duration; // 0.0 to 1.0
+                    
+                    switch (clip.transition.type) {
+                        case 'fade':
+                            ctx.globalAlpha = p;
+                            break;
+                        case 'wipe-right':
+                            // Reveal from left to right
+                            ctx.beginPath();
+                            ctx.rect(0, 0, canvasWidth * p, canvasHeight);
+                            ctx.clip();
+                            break;
+                        case 'wipe-left':
+                            // Reveal from right to left
+                            ctx.beginPath();
+                            ctx.rect(canvasWidth * (1 - p), 0, canvasWidth * p, canvasHeight);
+                            ctx.clip();
+                            break;
+                        case 'slide-right':
+                            // Slide in from left
+                            ctx.translate(-canvasWidth * (1 - p), 0);
+                            break;
+                        case 'slide-left':
+                            // Slide in from right
+                            ctx.translate(canvasWidth * (1 - p), 0);
+                            break;
+                        case 'circle':
+                            ctx.beginPath();
+                            const maxRadius = Math.sqrt(Math.pow(canvasWidth, 2) + Math.pow(canvasHeight, 2));
+                            ctx.arc(canvasWidth / 2, canvasHeight / 2, maxRadius * p, 0, Math.PI * 2);
+                            ctx.clip();
+                            break;
+                        default:
+                            ctx.globalAlpha = (clip as any)._renderAlpha;
+                            break;
+                    }
+                } else {
+                    // Basic fade fallback (fade out or manual fade in)
+                    ctx.globalAlpha = (clip as any)._renderAlpha;
+                }
                 
                 ctx.drawImage(video, offsetX, offsetY, drawW, drawH);
                 
-                ctx.globalAlpha = 1.0; // Reset
+                ctx.restore(); // Restore context (removes clips, alphas, translations)
             }
         });
 
@@ -364,8 +477,29 @@ const Player: FC<PlayerProps> = ({
     activeClips
         .filter(c => c.type === 'text')
         .forEach(clip => {
-            const alpha = (clip as any)._renderAlpha !== undefined ? (clip as any)._renderAlpha : 1;
-            ctx.globalAlpha = alpha;
+            ctx.save();
+
+            // Apply Transition Effects for Text
+            const relativeTime = currentTime - clip.offset;
+            if (clip.transition && relativeTime < clip.transition.duration) {
+                 const p = relativeTime / clip.transition.duration;
+                 switch (clip.transition.type) {
+                    case 'fade': ctx.globalAlpha = p; break;
+                    case 'wipe-right': ctx.beginPath(); ctx.rect(0, 0, canvasWidth * p, canvasHeight); ctx.clip(); break;
+                    case 'wipe-left': ctx.beginPath(); ctx.rect(canvasWidth * (1 - p), 0, canvasWidth * p, canvasHeight); ctx.clip(); break;
+                    case 'slide-right': ctx.translate(-canvasWidth * (1 - p), 0); break;
+                    case 'slide-left': ctx.translate(canvasWidth * (1 - p), 0); break;
+                    case 'circle': 
+                         ctx.beginPath();
+                         const maxRadius = Math.sqrt(Math.pow(canvasWidth, 2) + Math.pow(canvasHeight, 2));
+                         ctx.arc(canvasWidth / 2, canvasHeight / 2, maxRadius * p, 0, Math.PI * 2);
+                         ctx.clip();
+                         break;
+                    default: ctx.globalAlpha = (clip as any)._renderAlpha; break;
+                 }
+            } else {
+                ctx.globalAlpha = (clip as any)._renderAlpha;
+            }
             
             ctx.font = `${clip.fontSize || 60}px sans-serif`;
             ctx.fillStyle = clip.fontColor || '#ffffff';
@@ -378,7 +512,7 @@ const Player: FC<PlayerProps> = ({
             
             ctx.fillText(clip.textContent || "", x, y);
             
-            ctx.globalAlpha = 1.0;
+            ctx.restore();
         });
 
   }, [project.clips, project.width, project.height, project.isPlaying]);
@@ -410,8 +544,9 @@ const Player: FC<PlayerProps> = ({
                 renderFrameLogic(internalTimeRef.current);
                 
                 // 2. Prepare Stream
-                // Use 30fps for better stability on mobile/tablet exports
-                const canvasStream = canvasRef.current.captureStream(30); 
+                // Use project configured frame rate for export
+                const fps = project.fps || 25;
+                const canvasStream = canvasRef.current.captureStream(fps); 
                 const combinedTracks = [...canvasStream.getVideoTracks()];
 
                 // Only add audio track if we actually have audio clips or video with audio
@@ -515,7 +650,7 @@ const Player: FC<PlayerProps> = ({
     };
 
     initExport();
-  }, [isExporting, onExportFinish, project.clips, project.currentTime]); // Depend on start time
+  }, [isExporting, onExportFinish, project.clips, project.currentTime, project.fps]); // Depend on start time
 
 
   // Animation Loop
@@ -524,68 +659,99 @@ const Player: FC<PlayerProps> = ({
     const isPlayingRealtime = project.isPlaying;
     const isExportingActive = isInternalExporting.current;
 
-    // We only update time if we are actually "playing" or "exporting"
-    if (isPlayingRealtime || isExportingActive) {
-        if (lastTimeRef.current === null) {
-            lastTimeRef.current = performance.now();
-        } else {
-            const now = performance.now();
-            const dt = (now - lastTimeRef.current) / 1000;
-            lastTimeRef.current = now;
-            
-            // Advance internal time reference
-            internalTimeRef.current += dt * playbackSpeedRef.current;
+    requestRef.current = requestAnimationFrame(renderLoop);
 
-            // LOOP LOGIC
-            // If looping is enabled and we have valid in/out points
-            if (project.isLooping && !isExportingActive) {
-                if (project.inPoint !== null && project.outPoint !== null) {
-                    // Explicit Loop: In to Out
-                    if (internalTimeRef.current >= project.outPoint) {
-                        internalTimeRef.current = project.inPoint;
-                    }
-                } else if (contentDuration > 0) {
-                     // Implicit loop: Whole timeline content
-                     if (internalTimeRef.current >= contentDuration) {
-                         internalTimeRef.current = 0;
-                     }
-                }
-            }
-            
-            // Sync Parent UI (Note: this is async and won't affect next frame calculation which uses internalTimeRef)
-            onTimeUpdate(internalTimeRef.current);
+    const now = performance.now();
+    
+    // Frame Rate Throttling Logic
+    // Only throttle if we are EXPORTING. 
+    // For Preview/Editing, we want max smoothness (60/120Hz) to prevent UI judder.
+    let shouldRender = true;
+    let dt = 0;
+
+    if (isExportingActive) {
+        // Enforce strict FPS during export
+        const fps = project.fps || 25;
+        const fpsInterval = 1000 / fps;
+        const delta = now - lastRenderTimeRef.current;
+        
+        if (delta > fpsInterval) {
+            // Adjust for timer drift
+            lastRenderTimeRef.current = now - (delta % fpsInterval);
+            // In export, we simulate time passage exactly per frame
+            dt = 1 / fps; 
+            shouldRender = true;
+        } else {
+            shouldRender = false;
         }
     } else {
-        lastTimeRef.current = null;
-    }
-
-    // Stop Export check
-    const effectiveEndTime = isExporting && exportEndTime !== undefined ? exportEndTime : project.duration;
-    if (isExportingActive && internalTimeRef.current >= effectiveEndTime) {
-        // Delayed Stop Logic to ensure last frames are captured
-        if (!isStoppingRef.current) {
-             isStoppingRef.current = true;
-             console.log("Export duration reached. Stopping in 500ms...");
-             
-             // Continue rendering for 500ms to allow recorder to catch up
-             setTimeout(() => {
-                 if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-                    mediaRecorderRef.current.stop();
-                    // State cleanup happens in onstop event
-                } else {
-                    // If something weird happened and state is already inactive
-                    isInternalExporting.current = false;
-                    if (onExportFinish) onExportFinish(null);
-                }
-             }, 500);
+        // Normal Playback: Run as fast as possible (Monitor Refresh Rate)
+        // This avoids judder between 60Hz monitor and 25fps logic.
+        shouldRender = true;
+        if (lastTimeRef.current === null) {
+            dt = 0;
+        } else {
+            dt = (now - lastTimeRef.current) / 1000;
         }
+        lastTimeRef.current = now;
     }
 
-    // Call the logic to draw
-    renderFrameLogic(internalTimeRef.current);
+    if (shouldRender) {
+        // Update Internal Time
+        if (isPlayingRealtime || isExportingActive) {
+            if (!isExportingActive && lastTimeRef.current === null) {
+                // First frame of play
+                lastTimeRef.current = now;
+            } else {
+                internalTimeRef.current += dt * playbackSpeedRef.current;
 
-    requestRef.current = requestAnimationFrame(renderLoop);
-  }, [project.isPlaying, project.isLooping, project.inPoint, project.outPoint, isExporting, exportEndTime, onTimeUpdate, renderFrameLogic, onExportFinish, contentDuration]);
+                // LOOP LOGIC (Simplified: Implicit Loop only)
+                if (project.isLooping && !isExportingActive) {
+                    if (contentDuration > 0) {
+                        if (internalTimeRef.current >= contentDuration) {
+                            internalTimeRef.current = 0;
+                        }
+                    }
+                }
+                
+                // Sync Parent UI (THROTTLED)
+                // We only update the React State (which causes full re-renders) every 100ms
+                // The Canvas renders at full 60fps independently using internalTimeRef
+                if (now - lastUiUpdateRef.current > 100) {
+                    onTimeUpdate(internalTimeRef.current);
+                    lastUiUpdateRef.current = now;
+                }
+            }
+        } else {
+            lastTimeRef.current = null;
+        }
+
+        // Stop Export check
+        const effectiveEndTime = isExporting && exportEndTime !== undefined ? exportEndTime : project.duration;
+        if (isExportingActive && internalTimeRef.current >= effectiveEndTime) {
+            // Delayed Stop Logic to ensure last frames are captured
+            if (!isStoppingRef.current) {
+                isStoppingRef.current = true;
+                console.log("Export duration reached. Stopping in 500ms...");
+                
+                // Continue rendering for 500ms to allow recorder to catch up
+                setTimeout(() => {
+                    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+                        mediaRecorderRef.current.stop();
+                        // State cleanup happens in onstop event
+                    } else {
+                        // If something weird happened and state is already inactive
+                        isInternalExporting.current = false;
+                        if (onExportFinish) onExportFinish(null);
+                    }
+                }, 500);
+            }
+        }
+
+        // Call the logic to draw
+        renderFrameLogic(internalTimeRef.current);
+    }
+  }, [project.isPlaying, project.isLooping, project.fps, isExporting, exportEndTime, onTimeUpdate, renderFrameLogic, onExportFinish, contentDuration]);
 
   // Start/Stop Loop
   useEffect(() => {
@@ -675,6 +841,22 @@ const Player: FC<PlayerProps> = ({
 
   return (
     <div className="relative shadow-2xl bg-black" style={{ width, height }}>
+      {/* Hidden Container for Media Elements - Keeps them in DOM for reliable decoding */}
+      <div 
+        ref={hiddenContainerRef} 
+        style={{ 
+            position: 'fixed', 
+            top: '-9999px', 
+            left: '-9999px', 
+            width: '10px', 
+            height: '10px', 
+            overflow: 'hidden', 
+            opacity: 0.001,
+            pointerEvents: 'none',
+            zIndex: -9999 
+        }} 
+      />
+
       {/* Interactive Overlay Layer */}
       <div className="absolute inset-0 pointer-events-none z-10 overflow-hidden">
         {project.clips

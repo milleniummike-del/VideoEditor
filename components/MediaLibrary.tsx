@@ -1,4 +1,5 @@
 
+
 import { type ChangeEvent, type FC, type RefObject } from 'react';
 import { ProjectState } from '../types';
 
@@ -86,7 +87,7 @@ const MediaLibrary: FC<MediaLibraryProps> = ({
                 Upload {mediaType === 'video' ? 'Video' : 'Audio'}
             </button>
             <div className="mt-1 text-[9px] text-gray-500 italic text-center">
-                Note: Uploaded files are not saved permanently in projects.
+                Stored locally on this device.
             </div>
             </div>
         </div>
@@ -97,7 +98,7 @@ const MediaLibrary: FC<MediaLibraryProps> = ({
         ) : (
             <div className="space-y-3 pb-4">
             {project.library.map((clip, idx) => (
-                <div key={idx} className="relative group p-3 bg-gray-800 rounded hover:bg-gray-700 transition cursor-pointer border border-transparent hover:border-gray-600" onClick={() => onAddClip(idx)}>
+                <div key={clip.id} className="relative group p-3 bg-gray-800 rounded hover:bg-gray-700 transition cursor-pointer border border-transparent hover:border-gray-600" onClick={() => onAddClip(idx)}>
                 <div className="flex items-center justify-between mb-1">
                     <div className="text-sm font-medium text-white truncate max-w-[110px]">{clip.name}</div>
                     <span className={`text-[9px] px-1 rounded ${clip.type === 'video' ? 'bg-blue-900 text-blue-300' : 'bg-green-900 text-green-300'}`}>{clip.type === 'video' ? 'VID' : 'AUD'}</span>

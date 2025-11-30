@@ -1,7 +1,9 @@
 
+
 export const TIMELINE_HEIGHT = 200;
 export const TRACK_HEIGHT = 80;
 export const PIXELS_PER_SECOND_DEFAULT = 20;
+export const DEFAULT_FPS = 25;
 
 export const RESOLUTIONS = [
   { name: 'Landscape (1080p)', width: 1920, height: 1080 },
@@ -10,6 +12,8 @@ export const RESOLUTIONS = [
   { name: 'Landscape (720p)', width: 1280, height: 720 },
   { name: 'Cinema (21:9)', width: 2560, height: 1080 },
 ];
+
+export const FRAME_RATES = [24, 25, 30, 50, 60];
 
 export const STOCK_CLIPS: { name: string; url: string; duration: number }[] = [];
 

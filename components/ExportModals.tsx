@@ -1,6 +1,7 @@
 
 import { type Dispatch, type FC, type SetStateAction } from 'react';
 import { ProjectState } from '../types';
+import DraggableNumberInput from './DraggableNumberInput';
 
 interface ExportModalsProps {
     showExportModal: boolean;
@@ -34,28 +35,22 @@ const ExportModals: FC<ExportModalsProps> = ({
                     <h3 className="text-lg font-bold mb-4">Export Video</h3>
                     
                     <div className="space-y-4 mb-6">
+                        <DraggableNumberInput
+                            label="Start Time (seconds)"
+                            value={exportSettings.start}
+                            onChange={(val) => setExportSettings(s => ({...s, start: val}))}
+                            min={0}
+                            step={0.1}
+                        />
                         <div>
-                            <label className="block text-xs text-gray-400 mb-1">Start Time (seconds)</label>
-                            <input 
-                                type="number" 
-                                value={exportSettings.start}
-                                onChange={(e) => setExportSettings(s => ({...s, start: Number(e.target.value)}))}
-                                onKeyDown={(e) => e.stopPropagation()} // Stop propagation
-                                className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none"
-                                min="0"
-                            />
-                        </div>
-                        <div>
-                            <label className="block text-xs text-gray-400 mb-1">End Time (seconds)</label>
-                            <input 
-                                type="number" 
+                            <DraggableNumberInput
+                                label="End Time (seconds)"
                                 value={exportSettings.end}
-                                onChange={(e) => setExportSettings(s => ({...s, end: Number(e.target.value)}))}
-                                onKeyDown={(e) => e.stopPropagation()} // Stop propagation
-                                className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none"
-                                min="0"
+                                onChange={(val) => setExportSettings(s => ({...s, end: val}))}
+                                min={0}
+                                step={0.1}
                             />
-                            <p className="text-[10px] text-gray-500 mt-1">Defaults to In/Out points if set, or end of last clip.</p>
+                            <p className="text-[10px] text-gray-500 mt-1">Defaults to end of content.</p>
                         </div>
                         <div className="pt-2 border-t border-gray-700">
                             <p className="text-xs text-gray-400">Output Resolution: <span className="text-white">{project.width}x{project.height}</span></p>

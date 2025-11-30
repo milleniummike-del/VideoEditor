@@ -1,5 +1,9 @@
 
+
+export type TransitionType = 'fade' | 'wipe-left' | 'wipe-right' | 'slide-left' | 'slide-right' | 'circle';
+
 export interface LibraryClip {
+  id: string;
   name: string;
   url: string;
   duration: number;
@@ -16,8 +20,13 @@ export interface Clip {
   offset: number;   // Start time on timeline
   track: number;    // Track index
   type: 'video' | 'audio' | 'text';
-  fadeIn?: number;  // Duration in seconds
+  fadeIn?: number;  // Duration in seconds (Legacy/Simple opacity)
   fadeOut?: number; // Duration in seconds
+  transition?: {
+    type: TransitionType;
+    duration: number;
+  };
+  mediaLibraryId?: string; // Reference to LibraryClip/IndexedDB ID for persistence
   // Text specific properties
   textContent?: string;
   fontSize?: number;
@@ -42,13 +51,12 @@ export interface ProjectState {
   duration: number;
   currentTime: number;
   isPlaying: boolean;
-  isLooping: boolean; // Added loop state
-  inPoint: number | null; // Added In Marker
-  outPoint: number | null; // Added Out Marker
+  isLooping: boolean; 
   selectedClipId: string | null;
   zoom: number; // Pixels per second
   width: number; // Project Resolution Width
   height: number; // Project Resolution Height
+  fps: number; // Project Frame Rate
 }
 
 export interface GeminiAnalysis {

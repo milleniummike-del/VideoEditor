@@ -1,13 +1,14 @@
 
 import { type FC } from 'react';
-import { Clip } from '../types';
+import { Clip, TransitionType } from '../types';
+import DraggableNumberInput from './DraggableNumberInput';
 
 interface ClipPropertiesProps {
     selectedClip: Clip | null | undefined;
     onUpdateClip: (clip: Clip) => void;
     transitionDuration: number;
     setTransitionDuration: (duration: number) => void;
-    onApplyTransition: (type: 'cut' | 'dissolve') => void;
+    onApplyTransition: (type: TransitionType | 'cut') => void;
 }
 
 const ClipProperties: FC<ClipPropertiesProps> = ({ 
@@ -47,17 +48,15 @@ const ClipProperties: FC<ClipPropertiesProps> = ({
                 />
                 
                 <div className="grid grid-cols-2 gap-3 mt-3">
-                    <div>
-                        <label className="text-[10px] text-gray-500 mb-1 block">Font Size</label>
-                        <input 
-                            type="number" 
-                            min="10" 
-                            max="200"
-                            value={selectedClip.fontSize || 60}
-                            onChange={(e) => onUpdateClip({...selectedClip, fontSize: Number(e.target.value)})}
-                            className="w-full bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1 focus:outline-none focus:border-blue-500"
-                        />
-                    </div>
+                    <DraggableNumberInput
+                        label="Font Size"
+                        value={selectedClip.fontSize || 60}
+                        onChange={(val) => onUpdateClip({...selectedClip, fontSize: val})}
+                        min={10}
+                        max={200}
+                        step={1}
+                        className="w-full"
+                    />
                      <div>
                         <label className="text-[10px] text-gray-500 mb-1 block">Color</label>
                         <div className="flex space-x-2">
@@ -73,87 +72,89 @@ const ClipProperties: FC<ClipPropertiesProps> = ({
                 </div>
 
                 <div className="grid grid-cols-2 gap-3 mt-3">
-                     <div>
-                        <label className="text-[10px] text-gray-500 mb-1 block">Pos X</label>
-                        <input 
-                            type="number" 
-                            value={selectedClip.x !== undefined ? selectedClip.x : 0} 
-                            onChange={(e) => onUpdateClip({...selectedClip, x: Number(e.target.value)})}
-                            className="w-full bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1 focus:outline-none focus:border-blue-500"
-                        />
-                    </div>
-                     <div>
-                        <label className="text-[10px] text-gray-500 mb-1 block">Pos Y</label>
-                        <input 
-                            type="number" 
-                            value={selectedClip.y !== undefined ? selectedClip.y : 0}
-                            onChange={(e) => onUpdateClip({...selectedClip, y: Number(e.target.value)})}
-                            className="w-full bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1 focus:outline-none focus:border-blue-500"
-                        />
-                    </div>
+                     <DraggableNumberInput
+                        label="Pos X"
+                        value={selectedClip.x !== undefined ? selectedClip.x : 0}
+                        onChange={(val) => onUpdateClip({...selectedClip, x: val})}
+                        step={1}
+                        className="w-full"
+                    />
+                     <DraggableNumberInput
+                        label="Pos Y"
+                        value={selectedClip.y !== undefined ? selectedClip.y : 0}
+                        onChange={(val) => onUpdateClip({...selectedClip, y: val})}
+                        step={1}
+                        className="w-full"
+                    />
                 </div>
             </div>
         )}
         
         <div className="mb-3 border-t border-gray-700 pt-3">
-            <label className="text-[10px] text-gray-500 mb-2 block uppercase tracking-wider">Transition (In)</label>
-            <div className="flex space-x-2 mb-2">
-                    <button 
-                    onClick={() => onApplyTransition('cut')}
-                    className="flex-1 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs py-1"
-                    >
-                    Cut (None)
-                    </button>
-                    <button 
-                    onClick={() => onApplyTransition('dissolve')}
-                    className="flex-1 bg-blue-900/50 hover:bg-blue-800 border border-blue-800 rounded text-xs py-1 text-blue-200"
-                    >
-                    Cross Dissolve
-                    </button>
+            <label className="text-[10px] text-gray-500 mb-2 block uppercase tracking-wider">Transition In</label>
+            
+            <div className="grid grid-cols-3 gap-2 mb-2">
+                <button 
+                  onClick={() => onApplyTransition('cut')}
+                  className="bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-[10px] py-1 text-gray-300"
+                >
+                  None
+                </button>
+                <button 
+                  onClick={() => onApplyTransition('fade')}
+                  className="bg-blue-900/40 hover:bg-blue-800/60 border border-blue-800/50 rounded text-[10px] py-1 text-blue-200"
+                >
+                  Dissolve
+                </button>
+                <button 
+                  onClick={() => onApplyTransition('circle')}
+                  className="bg-purple-900/40 hover:bg-purple-800/60 border border-purple-800/50 rounded text-[10px] py-1 text-purple-200"
+                >
+                  Circle
+                </button>
             </div>
-            <div className="flex items-center space-x-2">
-                <label className="text-[10px] text-gray-500">Duration:</label>
-                    <input 
-                    type="number" 
-                    min="0.1"
-                    max="5"
-                    step="0.1"
-                    value={transitionDuration}
-                    onChange={(e) => setTransitionDuration(Number(e.target.value))}
-                    className="w-16 bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1 focus:outline-none focus:border-blue-500"
-                />
-                <span className="text-[10px] text-gray-500">s</span>
+            
+            <div className="grid grid-cols-2 gap-2 mb-2">
+                <button onClick={() => onApplyTransition('wipe-right')} className="bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-[10px] py-1">Wipe Right</button>
+                <button onClick={() => onApplyTransition('wipe-left')} className="bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-[10px] py-1">Wipe Left</button>
+                <button onClick={() => onApplyTransition('slide-right')} className="bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-[10px] py-1">Slide Right</button>
+                <button onClick={() => onApplyTransition('slide-left')} className="bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-[10px] py-1">Slide Left</button>
             </div>
+            
+            <DraggableNumberInput
+                label="Duration (s)"
+                value={transitionDuration}
+                onChange={setTransitionDuration}
+                min={0.1}
+                max={5}
+                step={0.1}
+                className="mt-2"
+            />
+            
             <p className="text-[9px] text-gray-500 mt-1 italic">
-                'Dissolve' overlaps clip with previous clip.
+                Applies overlap with previous clip.
             </p>
         </div>
         
         <div className="grid grid-cols-2 gap-3 border-t border-gray-700 pt-3">
-            <div>
-                <label className="text-[10px] text-gray-500 mb-1 block">Fade In (s)</label>
-                <input 
-                    type="number" 
-                    min="0"
-                    max="5"
-                    step="0.1"
-                    value={selectedClip.fadeIn || 0}
-                    onChange={(e) => onUpdateClip({...selectedClip, fadeIn: Number(e.target.value)})}
-                    className="w-full bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1 focus:outline-none focus:border-blue-500"
-                />
-            </div>
-            <div>
-                <label className="text-[10px] text-gray-500 mb-1 block">Fade Out (s)</label>
-                <input 
-                    type="number" 
-                    min="0"
-                    max="5"
-                    step="0.1"
-                    value={selectedClip.fadeOut || 0}
-                    onChange={(e) => onUpdateClip({...selectedClip, fadeOut: Number(e.target.value)})}
-                    className="w-full bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1 focus:outline-none focus:border-blue-500"
-                />
-            </div>
+            <DraggableNumberInput
+                label="Fade In (s)"
+                value={selectedClip.fadeIn || 0}
+                onChange={(val) => onUpdateClip({...selectedClip, fadeIn: val})}
+                min={0}
+                max={5}
+                step={0.1}
+                className="w-full"
+            />
+            <DraggableNumberInput
+                label="Fade Out (s)"
+                value={selectedClip.fadeOut || 0}
+                onChange={(val) => onUpdateClip({...selectedClip, fadeOut: val})}
+                min={0}
+                max={5}
+                step={0.1}
+                className="w-full"
+            />
         </div>
     </div>
   );
