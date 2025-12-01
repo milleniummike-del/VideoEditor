@@ -148,25 +148,6 @@ const App: FC = () => {
       setProject(p => ({ ...p, isLooping: !p.isLooping }));
   };
 
-  // Global Keyboard Shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Avoid triggering when user is typing in inputs
-      const activeTag = document.activeElement?.tagName.toLowerCase();
-      if (activeTag === 'input' || activeTag === 'textarea') {
-        return;
-      }
-
-      if (e.code === 'Space') {
-        e.preventDefault(); // Prevent page scrolling
-        handleTogglePlay();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleTogglePlay]);
-
   const handleFileUpload = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -727,14 +708,39 @@ const App: FC = () => {
     }));
   };
 
-  const handleDelete = () => {
-    if (!project.selectedClipId) return;
-    setProject(p => ({
-        ...p,
-        clips: p.clips.filter(c => c.id !== p.selectedClipId),
-        selectedClipId: null
-    }));
-  };
+  const handleDelete = useCallback(() => {
+    setProject(p => {
+        if (!p.selectedClipId) return p;
+        return {
+            ...p,
+            clips: p.clips.filter(c => c.id !== p.selectedClipId),
+            selectedClipId: null
+        };
+    });
+  }, []);
+
+  // Global Keyboard Shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Avoid triggering when user is typing in inputs
+      const activeTag = document.activeElement?.tagName.toLowerCase();
+      if (activeTag === 'input' || activeTag === 'textarea') {
+        return;
+      }
+
+      if (e.code === 'Space') {
+        e.preventDefault(); // Prevent page scrolling
+        handleTogglePlay();
+      }
+
+      if (e.code === 'Delete' || e.code === 'Backspace') {
+        handleDelete();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleTogglePlay, handleDelete]);
 
   const handleExportClick = () => {
     const maxContentTime = project.clips.reduce((max, clip) => Math.max(max, clip.offset + (clip.end - clip.start)), 0);
