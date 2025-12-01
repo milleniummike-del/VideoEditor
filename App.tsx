@@ -307,8 +307,8 @@ const App: FC = () => {
                         track: videoTrack.id,
                         type: 'video',
                         muted: true, 
-                        fadeIn: 0,
-                        fadeOut: 0,
+                        fadeIn: 1, // Default 1s fade
+                        fadeOut: 1, // Default 1s fade
                         mediaLibraryId: newLibraryClip.id,
                         scale: 1,
                         x: centerX,
@@ -369,8 +369,8 @@ const App: FC = () => {
                             offset: p.currentTime,
                             track: targetTrack.id,
                             type: newLibraryClip.type,
-                            fadeIn: 0,
-                            fadeOut: 0,
+                            fadeIn: newLibraryClip.type === 'video' ? 1 : 0,
+                            fadeOut: newLibraryClip.type === 'video' ? 1 : 0,
                             volume: 1,
                             mediaLibraryId: newLibraryClip.id,
                             scale: 1,
@@ -472,8 +472,8 @@ const App: FC = () => {
                 track: videoTrack.id,
                 type: 'video',
                 muted: true,
-                fadeIn: 0,
-                fadeOut: 0,
+                fadeIn: 1, // Default 1s fade
+                fadeOut: 1, // Default 1s fade
                 mediaLibraryId: stock.id,
                 scale: 1, // Original Size
                 x: centerX,
@@ -536,8 +536,8 @@ const App: FC = () => {
               offset: p.currentTime,
               track: targetTrack.id,
               type: stock.type,
-              fadeIn: 0,
-              fadeOut: 0,
+              fadeIn: stock.type === 'video' ? 1 : 0,
+              fadeOut: stock.type === 'video' ? 1 : 0,
               volume: 1,
               mediaLibraryId: stock.id,
               scale: 1,
