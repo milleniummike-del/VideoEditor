@@ -96,15 +96,17 @@ const MediaLibrary: FC<MediaLibraryProps> = ({
         {project.library.length === 0 ? (
             <div className="text-xs text-gray-600 italic">No clips in library.</div>
         ) : (
-            <div className="space-y-3 pb-4">
+            <div className="space-y-1.5 pb-4">
             {project.library.map((clip, idx) => (
-                <div key={clip.id} className="relative group p-3 bg-gray-800 rounded hover:bg-gray-700 transition cursor-pointer border border-transparent hover:border-gray-600" onClick={() => onAddClip(idx)}>
-                <div className="flex items-center justify-between mb-1">
-                    <div className="text-sm font-medium text-white truncate max-w-[110px]">{clip.name}</div>
-                    <span className={`text-[9px] px-1 rounded ${clip.type === 'video' ? 'bg-blue-900 text-blue-300' : 'bg-green-900 text-green-300'}`}>{clip.type === 'video' ? 'VID' : 'AUD'}</span>
+                <div key={clip.id} className="relative group p-2 bg-gray-800 rounded hover:bg-gray-700 transition cursor-pointer border border-transparent hover:border-gray-600" onClick={() => onAddClip(idx)}>
+                <div className="flex items-center justify-between">
+                    <div className="text-xs font-medium text-white truncate max-w-[140px] leading-tight" title={clip.name}>{clip.name}</div>
+                    <span className={`text-[8px] px-1 rounded ml-1 ${clip.type === 'video' ? 'bg-blue-900 text-blue-300' : 'bg-green-900 text-green-300'}`}>{clip.type === 'video' ? 'VID' : 'AUD'}</span>
                 </div>
-                <div className="text-xs text-gray-500">{clip.duration.toFixed(1)}s</div>
-                <div className="mt-2 text-xs text-blue-400 opacity-0 group-hover:opacity-100 transition-opacity">Click to Add</div>
+                <div className="flex justify-between items-end mt-0.5">
+                    <div className="text-[10px] text-gray-500">{clip.duration.toFixed(1)}s</div>
+                    <div className="text-[9px] text-blue-400 opacity-0 group-hover:opacity-100 transition-opacity">Add +</div>
+                </div>
                 
                 {/* Delete Button */}
                 <button 
@@ -112,10 +114,10 @@ const MediaLibrary: FC<MediaLibraryProps> = ({
                         e.stopPropagation();
                         onDeleteFromLibrary(idx);
                     }}
-                    className="absolute bottom-2 right-2 p-1.5 text-gray-500 hover:text-red-400"
+                    className="absolute top-1 right-1 p-0.5 text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity bg-gray-900/50 rounded"
                     title="Remove from Library"
                 >
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
                 </button>
                 </div>
             ))}
