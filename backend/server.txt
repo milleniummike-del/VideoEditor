@@ -1,0 +1,194 @@
+<?php
+/**
+ * RENAME THIS FILE TO server.php
+ * 
+ * LuminaCreate - PHP Backend Implementation
+ * 
+ * Provides endpoints for Project persistence (JSON) and Media Storage (Disk).
+ * 
+ * REQUIREMENTS:
+ * - PHP 7.4+
+ * - Write permissions on the directory to create 'projects.json' and 'uploads/'.
+ */
+
+// --- Headers & CORS ---
+header("Access-Control-Allow-Origin: *");
+header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
+header("Access-Control-Allow-Headers: Content-Type, Range"); // Added Range
+header("Access-Control-Expose-Headers: Content-Length, Content-Range");
+
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    exit(0);
+}
+
+// --- Configuration ---
+$persistenceMode = getenv('PERSISTENCE_MODE') ?: 'FILE'; 
+$storageMode = getenv('STORAGE_MODE') ?: 'DISK';       
+
+// Construct Base URL for assets
+// Improved HTTPS detection for proxies/load balancers
+$protocol = (
+    (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') || 
+    (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https')
+) ? "https" : "http";
+
+$baseUrl = getenv('BASE_URL') ?: $protocol . "://$_SERVER[HTTP_HOST]";
+
+// Handle subdirectory logic for uploads URL construction
+$scriptDir = dirname($_SERVER['SCRIPT_NAME']);
+$scriptDir = $scriptDir === '/' ? '' : $scriptDir;
+$fullBaseUrl = rtrim($baseUrl . $scriptDir, '/');
+
+// --- Strategies ---
+
+class FilePersistence {
+    private $dataFile;
+
+    public function __construct() {
+        $this->dataFile = __DIR__ . '/projects.json';
+    }
+
+    private function load() {
+        if (!file_exists($this->dataFile)) return [];
+        $content = file_get_contents($this->dataFile);
+        return json_decode($content, true) ?: [];
+    }
+
+    private function save($projects) {
+        file_put_contents($this->dataFile, json_encode($projects, JSON_PRETTY_PRINT));
+    }
+
+    public function getProjects() {
+        // Return array of projects (values only to ensure JSON array)
+        return array_values($this->load());
+    }
+
+    public function getProject($id) {
+        $projects = $this->load();
+        return isset($projects[$id]) ? $projects[$id] : null;
+    }
+
+    public function saveProject($project) {
+        $projects = $this->load();
+        
+        // Use Project ID as key for easy lookup/update
+        if (!isset($project['id'])) {
+            $project['id'] = uniqid('proj_');
+        }
+        
+        $projects[$project['id']] = $project;
+        $this->save($projects);
+        return $project;
+    }
+
+    public function deleteProject($id) {
+        $projects = $this->load();
+        if (isset($projects[$id])) {
+            unset($projects[$id]);
+            $this->save($projects);
+        }
+    }
+}
+
+class DiskStorage {
+    private $uploadsDir;
+    private $uploadsUrl;
+
+    public function __construct($baseUrl) {
+        $this->uploadsDir = __DIR__ . '/uploads';
+        $this->uploadsUrl = $baseUrl . '/uploads';
+        
+        if (!file_exists($this->uploadsDir)) {
+            mkdir($this->uploadsDir, 0777, true);
+        }
+    }
+
+    public function uploadFile($file) {
+        // Basic security check on extension
+        $allowedExts = ['mp4', 'webm', 'mov', 'mp3', 'wav', 'ogg', 'm4a', 'png', 'jpg', 'jpeg'];
+        $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+        
+        if (!in_array($ext, $allowedExts)) {
+            throw new Exception("File type not allowed.");
+        }
+
+        $filename = uniqid() . '-' . preg_replace('/[^a-zA-Z0-9\._-]/', '', $file['name']);
+        $destination = $this->uploadsDir . '/' . $filename;
+
+        if (move_uploaded_file($file['tmp_name'], $destination)) {
+            return $this->uploadsUrl . '/' . $filename;
+        }
+        throw new Exception("Failed to move uploaded file");
+    }
+}
+
+// --- Initialization ---
+
+$persistence = new FilePersistence();
+$storage = new DiskStorage($fullBaseUrl);
+
+// --- Routing ---
+
+$requestUri = $_SERVER['REQUEST_URI'];
+$method = $_SERVER['REQUEST_METHOD'];
+
+try {
+    // 1. Upload Route
+    if (strpos($requestUri, '/api/upload') !== false && $method === 'POST') {
+        if (isset($_FILES['file'])) {
+            $url = $storage->uploadFile($_FILES['file']);
+            echo json_encode(['url' => $url]);
+        } else {
+            http_response_code(400);
+            echo json_encode(['message' => 'No file uploaded']);
+        }
+        exit;
+    }
+
+    // 2. Projects Route
+    if (strpos($requestUri, '/api/projects') !== false) {
+        // Extract ID if present: /api/projects/{id}
+        $path = parse_url($requestUri, PHP_URL_PATH);
+        $parts = explode('/', trim($path, '/'));
+        $apiIndex = array_search('projects', $parts);
+        $id = ($apiIndex !== false && isset($parts[$apiIndex + 1])) ? $parts[$apiIndex + 1] : null;
+
+        if ($method === 'GET') {
+            if ($id) {
+                $proj = $persistence->getProject($id);
+                if ($proj) echo json_encode($proj);
+                else {
+                    http_response_code(404);
+                    echo json_encode(['message' => 'Not found']);
+                }
+            } else {
+                echo json_encode($persistence->getProjects());
+            }
+        } 
+        elseif ($method === 'POST') {
+            $input = json_decode(file_get_contents('php://input'), true);
+            if (!$input) throw new Exception("Invalid JSON");
+            
+            $saved = $persistence->saveProject($input);
+            http_response_code(201);
+            echo json_encode($saved);
+        }
+        elseif ($method === 'DELETE') {
+            if (!$id) throw new Exception("ID required");
+            $persistence->deleteProject($id);
+            http_response_code(204);
+        }
+        exit;
+    }
+    
+    // Root info
+    echo json_encode([
+        'service' => 'LuminaCreate Backend',
+        'status' => 'active'
+    ]);
+
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode(['error' => $e->getMessage()]);
+}
+?>

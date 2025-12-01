@@ -1,5 +1,4 @@
 
-
 import { useState, useCallback, useEffect, useMemo, useRef, type FC, type ChangeEvent } from 'react';
 import { ProjectState, Clip, LibraryClip, TransitionType } from './types';
 import { INITIAL_TRACKS, PIXELS_PER_SECOND_DEFAULT, RESOLUTIONS, DEFAULT_FPS } from './constants';
@@ -12,17 +11,57 @@ import ClipProperties from './components/ClipProperties';
 import MediaLibrary from './components/MediaLibrary';
 import ExportModals from './components/ExportModals';
 import { saveMedia, getAllMedia, deleteMedia, StoredMedia } from './services/storage';
+import { uploadMedia } from './services/api';
+
+// Helper to poll for resource availability (Fixes 412/404 race conditions on upload)
+const waitForResource = async (url: string, timeout = 5000): Promise<boolean> => {
+    // If it's a blob URL, it's ready immediately
+    if (url.startsWith('blob:')) return true;
+
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+        try {
+            const res = await fetch(url, { method: 'HEAD' });
+            if (res.ok) return true;
+        } catch (e) {
+            // Ignore network errors and retry
+        }
+        await new Promise(r => setTimeout(r, 500));
+    }
+    return false;
+};
 
 const App: FC = () => {
   const [mediaUrl, setMediaUrl] = useState('');
   const [mediaType, setMediaType] = useState<'video' | 'audio'>('video');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Persistence State: Map media IDs to current Blob URLs
+  // Storage Configuration with Persistence
+  const [useServerStorage, setUseServerStorage] = useState(() => {
+      return localStorage.getItem('lumina_use_server_storage') === 'true';
+  });
+  const [serverUrl, setServerUrl] = useState(() => {
+      return localStorage.getItem('lumina_server_url') || 'http://localhost:8000';
+  });
+
+  // Save storage preferences when they change
+  useEffect(() => {
+      localStorage.setItem('lumina_use_server_storage', String(useServerStorage));
+  }, [useServerStorage]);
+
+  useEffect(() => {
+      localStorage.setItem('lumina_server_url', serverUrl);
+  }, [serverUrl]);
+
+  // Persistence State: Map media IDs to current Blob URLs (Only used for Local Mode)
   const [mediaMap, setMediaMap] = useState<Map<string, string>>(new Map());
+
+  // Player Key to force remount on project load
+  const [playerKey, setPlayerKey] = useState(0);
 
   const [project, setProject] = useState<ProjectState>(() => {
     return {
+        id: crypto.randomUUID(),
         clips: [],
         library: [],
         tracks: INITIAL_TRACKS,
@@ -39,37 +78,23 @@ const App: FC = () => {
     };
   });
 
-  // Load Media from IndexedDB on startup
+  // Load Media from IndexedDB on startup (Only if Local Mode intent - but we load anyway to be safe)
   useEffect(() => {
       const loadPersistedMedia = async () => {
           try {
               const storedFiles = await getAllMedia();
               const newMediaMap = new Map<string, string>();
-              const libraryClips: LibraryClip[] = [];
-
+              
               storedFiles.forEach(file => {
                   const url = URL.createObjectURL(file.blob);
                   newMediaMap.set(file.id, url);
-                  libraryClips.push({
-                      id: file.id,
-                      name: file.name,
-                      type: file.type,
-                      duration: file.duration,
-                      url: url
-                  });
               });
 
               setMediaMap(newMediaMap);
               
-              // Populate library initially
-              setProject(p => {
-                  // If we have existing clips (e.g. from local storage migration if we kept it), we might want to keep them
-                  // But here we prioritize the DB source of truth for the library list
-                  return {
-                      ...p,
-                      library: libraryClips
-                  };
-              });
+              // Only auto-populate library from IndexedDB if we are in a fresh state 
+              // and NOT explicitly using server storage (which loads its own project)
+              // Logic here is tricky: We just hydration the map. Project loading handles the library list.
 
           } catch (e) {
               console.error("Failed to load media from IndexedDB", e);
@@ -161,7 +186,7 @@ const App: FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleTogglePlay]);
 
-  const handleFileUpload = (e: ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -176,6 +201,7 @@ const App: FC = () => {
     }
 
     // 1. Get Duration using temp element
+    // For local preview during upload, we always create a blob URL first
     const objectUrl = URL.createObjectURL(file);
     let tempMedia: HTMLVideoElement | HTMLAudioElement;
     if (detectedType === 'video') tempMedia = document.createElement('video');
@@ -187,31 +213,45 @@ const App: FC = () => {
     tempMedia.onloadedmetadata = async () => {
         const duration = tempMedia.duration || 10;
         const id = crypto.randomUUID();
-
-        // 2. Save to IndexedDB
-        const storedMedia: StoredMedia = {
-            id,
-            name: file.name,
-            type: detectedType,
-            blob: file,
-            duration,
-            date: Date.now()
-        };
+        
+        let finalUrl = objectUrl;
 
         try {
-            await saveMedia(storedMedia);
-            
+            if (useServerStorage) {
+                // SERVER MODE: Upload to Backend
+                console.log("Uploading to server...");
+                finalUrl = await uploadMedia({ baseUrl: serverUrl }, file);
+                console.log("Upload complete:", finalUrl);
+                
+                // CRITICAL: Wait for the file to be accessible by the browser (HEAD check)
+                // This prevents 412/404 errors if the backend/disk is slightly slow to index the file.
+                const isReady = await waitForResource(finalUrl);
+                if (!isReady) {
+                    console.warn("Uploaded resource check failed or timed out. Playback might be delayed.");
+                }
+            } else {
+                // LOCAL MODE: Save to IndexedDB
+                const storedMedia: StoredMedia = {
+                    id,
+                    name: file.name,
+                    type: detectedType,
+                    blob: file,
+                    duration,
+                    date: Date.now()
+                };
+                await saveMedia(storedMedia);
+                // Update map for consistency
+                setMediaMap(prev => new Map(prev).set(id, objectUrl));
+            }
+
             // 3. Update State
             const newClip: LibraryClip = {
-                id,
+                id: useServerStorage ? crypto.randomUUID() : id,
                 name: file.name,
-                url: objectUrl, // This URL is valid for current session
+                url: finalUrl,
                 duration,
                 type: detectedType
             };
-            
-            // Update map for consistency
-            setMediaMap(prev => new Map(prev).set(id, objectUrl));
             
             setProject(p => {
                 // Add to library
@@ -236,7 +276,7 @@ const App: FC = () => {
                         type: newClip.type,
                         fadeIn: 0,
                         fadeOut: 0,
-                        mediaLibraryId: newClip.id
+                        mediaLibraryId: useServerStorage ? undefined : newClip.id
                     };
                     updatedClips = [...updatedClips, timelineClip];
                     const newEndTime = timelineClip.offset + timelineClip.duration;
@@ -254,9 +294,10 @@ const App: FC = () => {
             });
             
             if (fileInputRef.current) fileInputRef.current.value = '';
+
         } catch (err) {
-            console.error("Failed to save to DB", err);
-            alert("Failed to save file to storage. Quota might be exceeded.");
+            console.error("Failed to save media", err);
+            alert("Failed to save media: " + (err as Error).message);
         }
         
         tempMedia.remove();
@@ -355,8 +396,8 @@ const App: FC = () => {
   const handleDeleteFromLibrary = async (index: number) => {
       const clip = project.library[index];
       
-      // If it has an ID that exists in our mediaMap, it's a DB file
-      if (mediaMap.has(clip.id)) {
+      // If Local Mode and it has an ID that exists in our mediaMap, it's a DB file
+      if (!useServerStorage && mediaMap.has(clip.id)) {
           try {
               await deleteMedia(clip.id);
               // Revoke URL
@@ -370,6 +411,8 @@ const App: FC = () => {
               console.error("Failed to delete from DB", e);
           }
       }
+      // If Server Mode: We generally don't delete files from server just by removing from library,
+      // as they might be used in other projects. A separate Media Manager would be needed for that.
 
       setProject(p => ({
           ...p,
@@ -630,8 +673,15 @@ const App: FC = () => {
   const handleLoadProject = (loadedProject: ProjectState) => {
     if (!loadedProject) return;
 
-    // Revitalize Blob URLs from mediaMap
+    // Revitalization Logic (Local vs Server)
+    
+    // 1. If loading a local project, revitalize blob URLs from mediaMap (IndexedDB)
+    // 2. If loading a server project, the URLs are likely already absolute (http://...), so we keep them.
+    // However, if the server project was saved with Blob URLs (mistake), they won't work. 
+    // Assumption: Server projects save with Server URLs.
+
     const restoredClips = (loadedProject.clips || []).map(c => {
+        // If we have a local map match, prefer it (Local Mode)
         if (c.mediaLibraryId && mediaMap.has(c.mediaLibraryId)) {
             return { ...c, url: mediaMap.get(c.mediaLibraryId)! };
         }
@@ -653,6 +703,7 @@ const App: FC = () => {
     }
 
     const safeProject: ProjectState = {
+        id: loadedProject.id || crypto.randomUUID(),
         name: loadedProject.name || "Imported Project",
         library: restoredLibrary,
         clips: restoredClips,
@@ -670,6 +721,7 @@ const App: FC = () => {
     };
 
     setProject(safeProject);
+    setPlayerKey(k => k + 1); // FORCE Player Component Remount to ensure all media elements are re-created from source
   };
 
   const playerDimensions = useMemo(() => {
@@ -735,6 +787,7 @@ const App: FC = () => {
         <div className="flex-1 flex flex-col min-w-0">
             <div className="flex-1 bg-gray-950 flex items-center justify-center p-8 relative overflow-hidden">
                 <Player 
+                    key={playerKey}
                     project={project} 
                     onTimeUpdate={handleTimeUpdate}
                     onDurationChange={() => {}}
@@ -779,6 +832,10 @@ const App: FC = () => {
             onClose={() => setShowProjectManager(false)} 
             currentProject={project}
             onLoadProject={handleLoadProject}
+            useServerStorage={useServerStorage}
+            setUseServerStorage={setUseServerStorage}
+            serverUrl={serverUrl}
+            setServerUrl={setServerUrl}
         />
 
         <ExportModals 

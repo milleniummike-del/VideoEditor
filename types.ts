@@ -44,6 +44,7 @@ export interface Track {
 }
 
 export interface ProjectState {
+  id?: string; // Unique ID for server persistence
   name?: string;
   library: LibraryClip[];
   clips: Clip[];

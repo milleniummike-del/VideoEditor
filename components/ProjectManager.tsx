@@ -1,11 +1,18 @@
+
 import { useState, useEffect, useRef, type FC, type ChangeEvent } from 'react';
 import { ProjectState } from '../types';
+import { fetchProjects, saveProject, deleteProject } from '../services/api';
 
 interface ProjectManagerProps {
   isOpen: boolean;
   onClose: () => void;
   currentProject: ProjectState;
   onLoadProject: (project: ProjectState) => void;
+  // Storage Props
+  useServerStorage: boolean;
+  setUseServerStorage: (val: boolean) => void;
+  serverUrl: string;
+  setServerUrl: (val: string) => void;
 }
 
 const STORAGE_KEY = 'lumina_saved_projects';
@@ -14,150 +21,171 @@ const ProjectManager: FC<ProjectManagerProps> = ({
   isOpen, 
   onClose, 
   currentProject, 
-  onLoadProject 
+  onLoadProject,
+  useServerStorage,
+  setUseServerStorage,
+  serverUrl,
+  setServerUrl
 }) => {
-  const [savedProjects, setSavedProjects] = useState<Record<string, ProjectState>>({});
+  const [localProjects, setLocalProjects] = useState<Record<string, ProjectState>>({});
+  const [serverProjects, setServerProjects] = useState<ProjectState[]>([]);
+  
   const [saveName, setSaveName] = useState(currentProject.name || '');
+  const [loading, setLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load projects from localStorage on mount/open
+  // Load projects from storage on mount/open or mode switch
   useEffect(() => {
     if (isOpen) {
-        try {
-            const raw = localStorage.getItem(STORAGE_KEY);
-            if (raw) {
-                try {
-                    setSavedProjects(JSON.parse(raw));
-                } catch (jsonError) {
-                    console.error("Corrupted local storage for projects", jsonError);
-                    // Fallback to empty if corrupted
-                    setSavedProjects({});
-                }
-            } else {
-                setSavedProjects({});
-            }
-        } catch (e) {
-            console.error("Failed to load projects from storage", e);
-            setSavedProjects({});
-        }
         setSaveName(currentProject.name || '');
-    }
-  }, [isOpen, currentProject.name]);
 
-  const handleSave = () => {
+        if (!useServerStorage) {
+            // Load Local
+            try {
+                const raw = localStorage.getItem(STORAGE_KEY);
+                if (raw) {
+                    setLocalProjects(JSON.parse(raw));
+                } else {
+                    setLocalProjects({});
+                }
+            } catch (e) {
+                console.error("Local storage error", e);
+                setLocalProjects({});
+            }
+        } else {
+            // Load Server
+            loadServerProjects();
+        }
+    }
+  }, [isOpen, useServerStorage, currentProject.name]);
+
+  const loadServerProjects = async () => {
+      setLoading(true);
+      try {
+          const projects = await fetchProjects({ baseUrl: serverUrl });
+          setServerProjects(projects);
+      } catch (e) {
+          console.error(e);
+          alert("Failed to connect to backend. Check URL and ensure server.php is running.");
+      } finally {
+          setLoading(false);
+      }
+  };
+
+  const handleSave = async () => {
     if (!saveName.trim()) {
         alert("Please enter a project name.");
         return;
     }
     
     // Create a safe deep copy to save
-    const newProjectState = JSON.parse(JSON.stringify({ 
+    const newProjectState: ProjectState = JSON.parse(JSON.stringify({ 
         ...currentProject, 
         name: saveName.trim() 
     }));
     
-    const updatedProjects = { ...savedProjects, [saveName.trim()]: newProjectState };
-    
-    try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedProjects));
-        setSavedProjects(updatedProjects);
-        // Also update the current live project with the name without reloading everything
-        onLoadProject(newProjectState); 
-        alert("Project saved successfully!");
-    } catch (e) {
-        console.error(e);
-        alert("Failed to save project. Storage might be full or data is too large.");
+    if (useServerStorage) {
+        setLoading(true);
+        try {
+            await saveProject({ baseUrl: serverUrl }, newProjectState);
+            await loadServerProjects();
+            onLoadProject(newProjectState); 
+            alert("Project saved to Server!");
+        } catch (e) {
+            alert("Failed to save to server.");
+        } finally {
+            setLoading(false);
+        }
+    } else {
+        const updatedProjects = { ...localProjects, [saveName.trim()]: newProjectState };
+        try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedProjects));
+            setLocalProjects(updatedProjects);
+            onLoadProject(newProjectState); 
+            alert("Project saved Locally!");
+        } catch (e) {
+            console.error(e);
+            alert("Failed to save. LocalStorage might be full.");
+        }
     }
   };
 
-  const handleDelete = (name: string) => {
-      if (confirm(`Are you sure you want to delete "${name}"?`)) {
-          const updated = { ...savedProjects };
-          delete updated[name];
-          setSavedProjects(updated);
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+  const handleDelete = async (keyOrId: string) => {
+      if (useServerStorage) {
+          if (confirm(`Delete project ID ${keyOrId}?`)) {
+              setLoading(true);
+              try {
+                  await deleteProject({ baseUrl: serverUrl }, keyOrId);
+                  await loadServerProjects();
+              } catch (e) {
+                  alert("Failed to delete.");
+              } finally {
+                  setLoading(false);
+              }
+          }
+      } else {
+          if (confirm(`Are you sure you want to delete "${keyOrId}"?`)) {
+              const updated = { ...localProjects };
+              delete updated[keyOrId];
+              setLocalProjects(updated);
+              localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+          }
       }
   };
 
-  const handleLoad = (name: string) => {
-      const project = savedProjects[name];
-      if (project) {
-          // Direct load without extra confirmation for smoother UX, 
-          // assumes user knows clicking Load replaces current project.
-          onLoadProject(project);
-          onClose();
+  const handleLoad = (keyOrId: string) => {
+      if (useServerStorage) {
+          const proj = serverProjects.find(p => p.id === keyOrId);
+          if (proj) {
+              onLoadProject(proj);
+              onClose();
+          }
+      } else {
+          const proj = localProjects[keyOrId];
+          if (proj) {
+              onLoadProject(proj);
+              onClose();
+          }
       }
   };
-  
-  const handleClearAll = () => {
-      if (confirm("Are you sure you want to delete ALL saved projects? This cannot be undone.")) {
+
+  const handleClearAllLocal = () => {
+      if (confirm("Delete ALL local projects? Undonable.")) {
           localStorage.removeItem(STORAGE_KEY);
-          setSavedProjects({});
+          setLocalProjects({});
       }
   };
 
+  // JSON Import/Export Logic
   const handleExportJSON = () => {
       try {
           const jsonString = JSON.stringify(currentProject, null, 2);
           const blob = new Blob([jsonString], { type: "application/json" });
           const url = URL.createObjectURL(blob);
-          
           const link = document.createElement('a');
           link.href = url;
-          // Sanitize filename to be safe
           const filename = (currentProject.name || "project").replace(/[^a-z0-9]/gi, '_').toLowerCase();
           link.download = `${filename}.json`;
-          
           document.body.appendChild(link);
           link.click();
-          
-          // Cleanup
-          setTimeout(() => {
-              document.body.removeChild(link);
-              URL.revokeObjectURL(url);
-          }, 100);
-      } catch (e) {
-          console.error("Export failed:", e);
-          alert("Failed to export project to JSON.");
-      }
+          setTimeout(() => { document.body.removeChild(link); URL.revokeObjectURL(url); }, 100);
+      } catch (e) { alert("Failed to export JSON."); }
   };
 
   const handleImportJSON = (e: ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
-
       const reader = new FileReader();
-      
       reader.onload = () => {
           try {
-              const result = reader.result;
-              if (typeof result !== 'string') {
-                  throw new Error("Failed to read file as text");
-              }
-              
-              const obj = JSON.parse(result);
-              
-              // Basic structure validation
+              const obj = JSON.parse(reader.result as string);
               if (obj && (Array.isArray(obj.clips) || Array.isArray(obj.library))) {
                   onLoadProject(obj);
                   onClose();
-              } else {
-                  alert("Invalid project file: Missing required data.");
-              }
-          } catch (err) {
-              console.error(err);
-              alert("Error parsing JSON file. Please ensure it is a valid Lumina Create project file.");
-          }
-          
-          // Reset input to allow selecting the same file again if needed
+              } else { alert("Invalid project file."); }
+          } catch (err) { alert("Error parsing JSON."); }
           if (fileInputRef.current) fileInputRef.current.value = '';
       };
-      
-      reader.onerror = () => {
-          alert("Error reading file.");
-          if (fileInputRef.current) fileInputRef.current.value = '';
-      };
-
       reader.readAsText(file);
   };
 
@@ -165,7 +193,7 @@ const ProjectManager: FC<ProjectManagerProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center">
-      <div className="bg-gray-800 w-[500px] max-h-[80vh] flex flex-col rounded-lg shadow-2xl border border-gray-700">
+      <div className="bg-gray-800 w-[600px] max-h-[90vh] flex flex-col rounded-lg shadow-2xl border border-gray-700">
         
         <div className="p-4 border-b border-gray-700 flex justify-between items-center">
             <h2 className="text-lg font-bold text-white">Project Manager</h2>
@@ -176,7 +204,45 @@ const ProjectManager: FC<ProjectManagerProps> = ({
 
         <div className="p-6 overflow-y-auto flex-1 custom-scrollbar">
             
-            {/* Save Section */}
+            {/* Storage Mode Toggle */}
+            <div className="mb-6 bg-gray-900 p-3 rounded border border-gray-700">
+                <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs uppercase text-gray-400 font-semibold">Storage Mode</span>
+                    <div className="flex bg-gray-800 rounded p-1">
+                        <button 
+                            onClick={() => setUseServerStorage(false)}
+                            className={`px-3 py-1 text-xs rounded transition-colors ${!useServerStorage ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
+                        >
+                            Local Storage
+                        </button>
+                        <button 
+                            onClick={() => setUseServerStorage(true)}
+                            className={`px-3 py-1 text-xs rounded transition-colors ${useServerStorage ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
+                        >
+                            Server API
+                        </button>
+                    </div>
+                </div>
+                
+                {useServerStorage && (
+                    <div className="mt-2">
+                         <label className="text-[10px] text-gray-500 block mb-1">Backend URL</label>
+                         <div className="flex gap-2">
+                             <input 
+                                type="text"
+                                value={serverUrl}
+                                onChange={(e) => setServerUrl(e.target.value)}
+                                className="flex-1 bg-gray-800 border border-gray-600 text-white text-xs px-2 py-1 rounded"
+                             />
+                             <button onClick={loadServerProjects} className="text-xs bg-gray-700 hover:bg-gray-600 px-2 rounded">
+                                 Refresh
+                             </button>
+                         </div>
+                    </div>
+                )}
+            </div>
+
+            {/* Current Project Actions */}
             <div className="mb-8">
                 <h3 className="text-xs uppercase text-gray-500 font-semibold mb-2">Current Project</h3>
                 <div className="flex space-x-2">
@@ -189,9 +255,10 @@ const ProjectManager: FC<ProjectManagerProps> = ({
                     />
                     <button 
                         onClick={handleSave}
-                        className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm font-medium"
+                        disabled={loading}
+                        className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm font-medium disabled:opacity-50"
                     >
-                        Save
+                        {loading ? 'Saving...' : 'Save'}
                     </button>
                 </div>
                 <div className="mt-2 flex space-x-3 text-xs">
@@ -202,44 +269,59 @@ const ProjectManager: FC<ProjectManagerProps> = ({
                 </div>
             </div>
 
-            {/* Saved Projects List */}
+            {/* List */}
             <div>
                 <div className="flex justify-between items-center mb-2">
-                    <h3 className="text-xs uppercase text-gray-500 font-semibold">Saved Projects (LocalStorage)</h3>
-                    {Object.keys(savedProjects).length > 0 && (
-                        <button onClick={handleClearAll} className="text-[10px] text-red-400 hover:underline">Clear All</button>
+                    <h3 className="text-xs uppercase text-gray-500 font-semibold">
+                        {useServerStorage ? 'Server Projects' : 'Local Projects'}
+                    </h3>
+                    {!useServerStorage && Object.keys(localProjects).length > 0 && (
+                        <button onClick={handleClearAllLocal} className="text-[10px] text-red-400 hover:underline">Clear All</button>
                     )}
                 </div>
-                {Object.keys(savedProjects).length === 0 ? (
-                    <div className="text-sm text-gray-500 italic p-4 bg-gray-900/50 rounded text-center border border-gray-800 border-dashed">
-                        No saved projects found.
-                    </div>
+
+                {loading && useServerStorage ? (
+                    <div className="text-center py-4 text-gray-500 text-xs">Loading projects...</div>
                 ) : (
                     <div className="space-y-2">
-                        {Object.keys(savedProjects).sort().map(name => (
-                            <div key={name} className="flex items-center justify-between bg-gray-900 p-3 rounded border border-gray-700 hover:border-gray-600 group">
-                                <span className="text-sm text-white font-medium truncate flex-1 mr-4">{name}</span>
-                                <div className="flex space-x-2 opacity-100 sm:opacity-60 group-hover:opacity-100 transition-opacity">
-                                    <button 
-                                        onClick={() => handleLoad(name)}
-                                        className="text-xs bg-gray-700 hover:bg-blue-600 text-white px-3 py-1.5 rounded transition-colors"
-                                    >
-                                        Load
-                                    </button>
-                                    <button 
-                                        onClick={() => handleDelete(name)}
-                                        className="text-xs bg-gray-800 hover:bg-red-900/80 text-red-400 px-3 py-1.5 rounded transition-colors"
-                                    >
-                                        Delete
-                                    </button>
-                                </div>
-                            </div>
-                        ))}
+                        {useServerStorage ? (
+                            // Server List
+                            serverProjects.length === 0 ? (
+                                <div className="text-sm text-gray-500 italic p-4 text-center">No projects on server.</div>
+                            ) : (
+                                serverProjects.map(p => (
+                                    <div key={p.id} className="flex items-center justify-between bg-gray-900 p-3 rounded border border-gray-700 hover:border-gray-600 group">
+                                        <div className="flex-1 min-w-0 mr-4">
+                                            <div className="text-sm text-white font-medium truncate">{p.name || 'Untitled'}</div>
+                                            <div className="text-[10px] text-gray-500">ID: {p.id}</div>
+                                        </div>
+                                        <div className="flex space-x-2">
+                                            <button onClick={() => handleLoad(p.id!)} className="text-xs bg-gray-700 hover:bg-blue-600 px-3 py-1.5 rounded">Load</button>
+                                            <button onClick={() => handleDelete(p.id!)} className="text-xs bg-gray-800 hover:bg-red-900/80 text-red-400 px-3 py-1.5 rounded">Delete</button>
+                                        </div>
+                                    </div>
+                                ))
+                            )
+                        ) : (
+                            // Local List
+                            Object.keys(localProjects).length === 0 ? (
+                                <div className="text-sm text-gray-500 italic p-4 text-center">No saved projects.</div>
+                            ) : (
+                                Object.keys(localProjects).sort().map(name => (
+                                    <div key={name} className="flex items-center justify-between bg-gray-900 p-3 rounded border border-gray-700 hover:border-gray-600 group">
+                                        <span className="text-sm text-white font-medium truncate flex-1 mr-4">{name}</span>
+                                        <div className="flex space-x-2">
+                                            <button onClick={() => handleLoad(name)} className="text-xs bg-gray-700 hover:bg-blue-600 px-3 py-1.5 rounded">Load</button>
+                                            <button onClick={() => handleDelete(name)} className="text-xs bg-gray-800 hover:bg-red-900/80 text-red-400 px-3 py-1.5 rounded">Delete</button>
+                                        </div>
+                                    </div>
+                                ))
+                            )
+                        )}
                     </div>
                 )}
             </div>
         </div>
-
       </div>
     </div>
   );

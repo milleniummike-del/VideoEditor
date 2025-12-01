@@ -1,0 +1,25 @@
+<IfModule mod_headers.c>
+    # Allow cross-origin requests (Critical for Canvas/Video tag)
+    Header set Access-Control-Allow-Origin "*"
+    Header set Access-Control-Allow-Methods "GET, HEAD, OPTIONS"
+    Header set Access-Control-Allow-Headers "Range"
+    Header set Access-Control-Expose-Headers "Content-Length, Content-Range, Content-Type"
+</IfModule>
+
+# Fix "412 Precondition Failed" errors during video seeking/streaming
+# This disables ETag validation which often conflicts with browser Range requests on some server configs
+FileETag None
+<IfModule mod_headers.c>
+    Header unset ETag
+</IfModule>
+
+# Disable strict ModSecurity rules that might block video streams
+<IfModule mod_security.c>
+    SecFilterEngine Off
+    SecFilterScanPOST Off
+</IfModule>
+
+# Ensure correct MIME types
+AddType video/mp4 .mp4
+AddType video/webm .webm
+AddType audio/mpeg .mp3
