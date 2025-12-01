@@ -8,6 +8,8 @@ export interface LibraryClip {
   url: string;
   duration: number;
   type: 'video' | 'audio';
+  width?: number;  // Source width
+  height?: number; // Source height
 }
 
 export interface Clip {
@@ -20,6 +22,8 @@ export interface Clip {
   offset: number;   // Start time on timeline
   track: number;    // Track index
   type: 'video' | 'audio' | 'text';
+  muted?: boolean;  // If true, audio from this clip is suppressed (useful when audio is split to another track)
+  volume?: number;  // Volume multiplier (1.0 = 100%)
   fadeIn?: number;  // Duration in seconds (Legacy/Simple opacity)
   fadeOut?: number; // Duration in seconds
   transition?: {
@@ -27,12 +31,16 @@ export interface Clip {
     duration: number;
   };
   mediaLibraryId?: string; // Reference to LibraryClip/IndexedDB ID for persistence
+  
+  // Visual properties (Video & Text)
+  scale?: number; // 1.0 = original size
+  x?: number;
+  y?: number;
+  
   // Text specific properties
   textContent?: string;
   fontSize?: number;
   fontColor?: string;
-  x?: number;
-  y?: number;
 }
 
 export interface Track {

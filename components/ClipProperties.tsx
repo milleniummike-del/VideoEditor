@@ -1,4 +1,3 @@
-
 import { type FC } from 'react';
 import { Clip, TransitionType } from '../types';
 import DraggableNumberInput from './DraggableNumberInput';
@@ -90,7 +89,52 @@ const ClipProperties: FC<ClipPropertiesProps> = ({
             </div>
         )}
         
+        {/* Audio Volume */}
+        {selectedClip.type === 'audio' && (
+            <div className="mb-3 border-t border-gray-700 pt-3">
+                 <DraggableNumberInput
+                    label="Volume (%)"
+                    value={Math.round((selectedClip.volume ?? 1) * 100)}
+                    onChange={(val) => onUpdateClip({...selectedClip, volume: Math.max(0, val / 100)})}
+                    min={0}
+                    max={200}
+                    step={1}
+                    className="w-full"
+                />
+            </div>
+        )}
+
+        {/* Video Transitions & Transforms */}
+        {selectedClip.type === 'video' && (
         <div className="mb-3 border-t border-gray-700 pt-3">
+            
+            {/* Transform Controls */}
+            <div className="mb-4">
+                 <label className="text-[10px] text-gray-500 mb-2 block uppercase tracking-wider">Transform</label>
+                 <div className="grid grid-cols-3 gap-2">
+                     <DraggableNumberInput
+                        label="Scale"
+                        value={selectedClip.scale !== undefined ? selectedClip.scale : 1}
+                        onChange={(val) => onUpdateClip({...selectedClip, scale: val})}
+                        step={0.05}
+                        min={0.1}
+                        max={5}
+                    />
+                     <DraggableNumberInput
+                        label="Pos X"
+                        value={selectedClip.x !== undefined ? selectedClip.x : 0}
+                        onChange={(val) => onUpdateClip({...selectedClip, x: val})}
+                        step={1}
+                    />
+                     <DraggableNumberInput
+                        label="Pos Y"
+                        value={selectedClip.y !== undefined ? selectedClip.y : 0}
+                        onChange={(val) => onUpdateClip({...selectedClip, y: val})}
+                        step={1}
+                    />
+                 </div>
+            </div>
+
             <label className="text-[10px] text-gray-500 mb-2 block uppercase tracking-wider">Transition In</label>
             
             <div className="grid grid-cols-3 gap-2 mb-2">
@@ -135,7 +179,9 @@ const ClipProperties: FC<ClipPropertiesProps> = ({
                 Applies overlap with previous clip.
             </p>
         </div>
+        )}
         
+        {/* Generic Fade Props */}
         <div className="grid grid-cols-2 gap-3 border-t border-gray-700 pt-3">
             <DraggableNumberInput
                 label="Fade In (s)"

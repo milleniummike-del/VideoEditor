@@ -1,4 +1,3 @@
-
 import { useState, useCallback, useEffect, useMemo, useRef, type FC, type ChangeEvent } from 'react';
 import { ProjectState, Clip, LibraryClip, TransitionType } from './types';
 import { INITIAL_TRACKS, PIXELS_PER_SECOND_DEFAULT, RESOLUTIONS, DEFAULT_FPS } from './constants';
@@ -13,24 +12,6 @@ import ExportModals from './components/ExportModals';
 import { saveMedia, getAllMedia, deleteMedia, StoredMedia } from './services/storage';
 import { uploadMedia } from './services/api';
 
-// Helper to poll for resource availability (Fixes 412/404 race conditions on upload)
-const waitForResource = async (url: string, timeout = 5000): Promise<boolean> => {
-    // If it's a blob URL, it's ready immediately
-    if (url.startsWith('blob:')) return true;
-
-    const start = Date.now();
-    while (Date.now() - start < timeout) {
-        try {
-            const res = await fetch(url, { method: 'HEAD' });
-            if (res.ok) return true;
-        } catch (e) {
-            // Ignore network errors and retry
-        }
-        await new Promise(r => setTimeout(r, 500));
-    }
-    return false;
-};
-
 const App: FC = () => {
   const [mediaUrl, setMediaUrl] = useState('');
   const [mediaType, setMediaType] = useState<'video' | 'audio'>('video');
@@ -41,7 +22,7 @@ const App: FC = () => {
       return localStorage.getItem('lumina_use_server_storage') === 'true';
   });
   const [serverUrl, setServerUrl] = useState(() => {
-      return localStorage.getItem('lumina_server_url') || 'http://localhost:8000';
+      return localStorage.getItem('lumina_server_url') || 'https://artificialfiretiger.com/videoeditor';
   });
 
   // Save storage preferences when they change
@@ -200,7 +181,7 @@ const App: FC = () => {
         else detectedType = mediaType;
     }
 
-    // 1. Get Duration using temp element
+    // 1. Get Duration and Dimensions using temp element
     // For local preview during upload, we always create a blob URL first
     const objectUrl = URL.createObjectURL(file);
     let tempMedia: HTMLVideoElement | HTMLAudioElement;
@@ -212,6 +193,14 @@ const App: FC = () => {
     
     tempMedia.onloadedmetadata = async () => {
         const duration = tempMedia.duration || 10;
+        let width = 0;
+        let height = 0;
+        
+        if (detectedType === 'video' && tempMedia instanceof HTMLVideoElement) {
+             width = tempMedia.videoWidth;
+             height = tempMedia.videoHeight;
+        }
+
         const id = crypto.randomUUID();
         
         let finalUrl = objectUrl;
@@ -222,13 +211,6 @@ const App: FC = () => {
                 console.log("Uploading to server...");
                 finalUrl = await uploadMedia({ baseUrl: serverUrl }, file);
                 console.log("Upload complete:", finalUrl);
-                
-                // CRITICAL: Wait for the file to be accessible by the browser (HEAD check)
-                // This prevents 412/404 errors if the backend/disk is slightly slow to index the file.
-                const isReady = await waitForResource(finalUrl);
-                if (!isReady) {
-                    console.warn("Uploaded resource check failed or timed out. Playback might be delayed.");
-                }
             } else {
                 // LOCAL MODE: Save to IndexedDB
                 const storedMedia: StoredMedia = {
@@ -245,53 +227,21 @@ const App: FC = () => {
             }
 
             // 3. Update State
-            const newClip: LibraryClip = {
+            const newLibraryClip: LibraryClip = {
                 id: useServerStorage ? crypto.randomUUID() : id,
                 name: file.name,
                 url: finalUrl,
                 duration,
-                type: detectedType
+                type: detectedType,
+                width: width > 0 ? width : undefined,
+                height: height > 0 ? height : undefined
             };
             
-            setProject(p => {
-                // Add to library
-                const updatedLibrary = [...p.library, newClip];
-                
-                // Also Add to Timeline immediately
-                const targetTrack = p.tracks.find(t => t.type === newClip.type);
-                let updatedClips = p.clips;
-                let updatedDuration = p.duration;
-                let updatedCurrentTime = p.currentTime;
-
-                if (targetTrack) {
-                    const timelineClip: Clip = {
-                        id: crypto.randomUUID(),
-                        name: newClip.name,
-                        url: newClip.url,
-                        duration: newClip.duration,
-                        start: 0,
-                        end: newClip.duration,
-                        offset: p.currentTime,
-                        track: targetTrack.id,
-                        type: newClip.type,
-                        fadeIn: 0,
-                        fadeOut: 0,
-                        mediaLibraryId: useServerStorage ? undefined : newClip.id
-                    };
-                    updatedClips = [...updatedClips, timelineClip];
-                    const newEndTime = timelineClip.offset + timelineClip.duration;
-                    updatedDuration = Math.max(p.duration, newEndTime + 10);
-                    updatedCurrentTime = newEndTime;
-                }
-
-                return { 
-                    ...p, 
-                    library: updatedLibrary,
-                    clips: updatedClips,
-                    duration: updatedDuration,
-                    currentTime: updatedCurrentTime
-                };
-            });
+            setProject(p => ({
+                ...p,
+                library: [...p.library, newLibraryClip]
+                // Note: We no longer automatically add uploaded clips to the timeline
+            }));
             
             if (fileInputRef.current) fileInputRef.current.value = '';
 
@@ -325,43 +275,132 @@ const App: FC = () => {
     
     const handleSuccess = () => {
         const duration = tempMedia.duration;
+        let width = 0;
+        let height = 0;
+
+        if (mediaType === 'video' && tempMedia instanceof HTMLVideoElement) {
+            width = tempMedia.videoWidth;
+            height = tempMedia.videoHeight;
+        }
+
         if (duration && !isNaN(duration) && duration !== Infinity) {
-             const newClip: LibraryClip = {
+             const newLibraryClip: LibraryClip = {
                 id: crypto.randomUUID(), // Transient ID
                 name: `${mediaType === 'video' ? 'Video' : 'Audio'} ${project.library.length + 1}`,
                 url: tempMedia.src,
                 duration: duration, 
-                type: mediaType
+                type: mediaType,
+                width: width > 0 ? width : undefined,
+                height: height > 0 ? height : undefined
             };
 
             setProject(p => {
-                const updatedLibrary = [...p.library, newClip];
+                const updatedLibrary = [...p.library, newLibraryClip];
+                
+                // Note: URL adds still add to timeline directly based on previous request logic "Add media to library add to timeline as well", 
+                // but user later requested uploads NOT to add. I will respect the "uploads not adding" logic for uploads, but keep URL adds direct for now or standardize. 
+                // Given the recent prompt "Video clips should hold the scaling information...", I will update the timeline creation logic below to handle scale.
 
-                // Also Add to Timeline immediately
-                const targetTrack = p.tracks.find(t => t.type === newClip.type);
                 let updatedClips = p.clips;
                 let updatedDuration = p.duration;
                 let updatedCurrentTime = p.currentTime;
 
-                if (targetTrack) {
-                    const timelineClip: Clip = {
+                // Center logic
+                const centerX = (p.width - (width || 1280)) / 2;
+                const centerY = (p.height - (height || 720)) / 2;
+
+                const videoTrack = p.tracks.find(t => t.id === 0);
+                const linkedAudioTrack = p.tracks.find(t => t.id === 1);
+                const musicTrack = p.tracks.find(t => t.id === 2);
+
+                // Split Logic for URL additions
+                if (mediaType === 'video' && videoTrack && linkedAudioTrack) {
+                    const timelineVideoClip: Clip = {
                         id: crypto.randomUUID(),
-                        name: newClip.name,
-                        url: newClip.url,
-                        duration: newClip.duration,
+                        name: newLibraryClip.name,
+                        url: newLibraryClip.url,
+                        duration: newLibraryClip.duration,
                         start: 0,
-                        end: newClip.duration,
+                        end: newLibraryClip.duration,
                         offset: p.currentTime,
-                        track: targetTrack.id,
-                        type: newClip.type,
+                        track: videoTrack.id,
+                        type: 'video',
+                        muted: true, 
                         fadeIn: 0,
                         fadeOut: 0,
-                        mediaLibraryId: newClip.id
+                        mediaLibraryId: newLibraryClip.id,
+                        scale: 1,
+                        x: centerX,
+                        y: centerY
+                    };
+                    
+                    const timelineAudioClip: Clip = {
+                        id: crypto.randomUUID(),
+                        name: newLibraryClip.name + " (Audio)",
+                        url: newLibraryClip.url,
+                        duration: newLibraryClip.duration,
+                        start: 0,
+                        end: newLibraryClip.duration,
+                        offset: p.currentTime,
+                        track: linkedAudioTrack.id,
+                        type: 'audio',
+                        fadeIn: 0,
+                        fadeOut: 0,
+                        volume: 1,
+                        mediaLibraryId: newLibraryClip.id
+                    };
+
+                    updatedClips = [...updatedClips, timelineVideoClip, timelineAudioClip];
+                    const newEndTime = timelineVideoClip.offset + timelineVideoClip.duration;
+                    updatedDuration = Math.max(p.duration, newEndTime + 10);
+                    updatedCurrentTime = newEndTime;
+                } else if (mediaType === 'audio' && musicTrack) {
+                    const timelineClip: Clip = {
+                        id: crypto.randomUUID(),
+                        name: newLibraryClip.name,
+                        url: newLibraryClip.url,
+                        duration: newLibraryClip.duration,
+                        start: 0,
+                        end: newLibraryClip.duration,
+                        offset: p.currentTime,
+                        track: musicTrack.id,
+                        type: 'audio',
+                        fadeIn: 0,
+                        fadeOut: 0,
+                        volume: 1,
+                        mediaLibraryId: newLibraryClip.id
                     };
                     updatedClips = [...updatedClips, timelineClip];
                     const newEndTime = timelineClip.offset + timelineClip.duration;
                     updatedDuration = Math.max(p.duration, newEndTime + 10);
                     updatedCurrentTime = newEndTime;
+                }
+                else {
+                    const targetTrack = p.tracks.find(t => t.type === newLibraryClip.type);
+                    if (targetTrack) {
+                        const timelineClip: Clip = {
+                            id: crypto.randomUUID(),
+                            name: newLibraryClip.name,
+                            url: newLibraryClip.url,
+                            duration: newLibraryClip.duration,
+                            start: 0,
+                            end: newLibraryClip.duration,
+                            offset: p.currentTime,
+                            track: targetTrack.id,
+                            type: newLibraryClip.type,
+                            fadeIn: 0,
+                            fadeOut: 0,
+                            volume: 1,
+                            mediaLibraryId: newLibraryClip.id,
+                            scale: 1,
+                            x: centerX,
+                            y: centerY
+                        };
+                        updatedClips = [...updatedClips, timelineClip];
+                        const newEndTime = timelineClip.offset + timelineClip.duration;
+                        updatedDuration = Math.max(p.duration, newEndTime + 10);
+                        updatedCurrentTime = newEndTime;
+                    }
                 }
 
                 return { 
@@ -422,36 +461,122 @@ const App: FC = () => {
 
   const handleAddClip = (index: number) => {
     const stock = project.library[index];
-    const targetTrack = project.tracks.find(t => t.type === stock.type);
     
-    if (!targetTrack) {
-        alert(`No track available for ${stock.type} clips.`);
-        return;
-    }
+    setProject(p => {
+        let updatedClips = p.clips;
+        let updatedDuration = p.duration;
+        let updatedCurrentTime = p.currentTime;
 
-    const newClip: Clip = {
-      id: crypto.randomUUID(),
-      name: stock.name,
-      url: stock.url,
-      duration: stock.duration,
-      start: 0,
-      end: stock.duration,
-      offset: project.currentTime,
-      track: targetTrack.id,
-      type: stock.type,
-      fadeIn: 0,
-      fadeOut: 0,
-      mediaLibraryId: stock.id // Link for persistence
-    };
-    
-    const newEndTime = newClip.offset + newClip.duration;
-    
-    setProject(p => ({
-        ...p,
-        clips: [...p.clips, newClip],
-        duration: Math.max(p.duration, newEndTime + 10),
-        currentTime: newEndTime // Jump to end of new clip
-    }));
+        const videoTrack = p.tracks.find(t => t.id === 0);
+        const linkedAudioTrack = p.tracks.find(t => t.id === 1);
+        const musicTrack = p.tracks.find(t => t.id === 2);
+
+        // Center calculation
+        // If width/height unknown, default to 0,0 (top left) logic or center a dummy size?
+        // Better to center based on safe defaults if unknown, or center properly if known.
+        const stockW = stock.width || 1280; // assume 720p if unknown
+        const stockH = stock.height || 720;
+        const centerX = (p.width - stockW) / 2;
+        const centerY = (p.height - stockH) / 2;
+
+        if (stock.type === 'video' && videoTrack && linkedAudioTrack) {
+             const timelineVideoClip: Clip = {
+                id: crypto.randomUUID(),
+                name: stock.name,
+                url: stock.url,
+                duration: stock.duration,
+                start: 0,
+                end: stock.duration,
+                offset: p.currentTime,
+                track: videoTrack.id,
+                type: 'video',
+                muted: true,
+                fadeIn: 0,
+                fadeOut: 0,
+                mediaLibraryId: stock.id,
+                scale: 1, // Original Size
+                x: centerX,
+                y: centerY
+            };
+            
+            const timelineAudioClip: Clip = {
+                id: crypto.randomUUID(),
+                name: stock.name + " (Audio)",
+                url: stock.url,
+                duration: stock.duration,
+                start: 0,
+                end: stock.duration,
+                offset: p.currentTime,
+                track: linkedAudioTrack.id,
+                type: 'audio',
+                fadeIn: 0,
+                fadeOut: 0,
+                volume: 1,
+                mediaLibraryId: stock.id
+            };
+
+            updatedClips = [...updatedClips, timelineVideoClip, timelineAudioClip];
+            const newEndTime = timelineVideoClip.offset + timelineVideoClip.duration;
+            updatedDuration = Math.max(p.duration, newEndTime + 10);
+            updatedCurrentTime = newEndTime;
+        } else if (stock.type === 'audio' && musicTrack) {
+             const timelineClip: Clip = {
+                id: crypto.randomUUID(),
+                name: stock.name,
+                url: stock.url,
+                duration: stock.duration,
+                start: 0,
+                end: stock.duration,
+                offset: p.currentTime,
+                track: musicTrack.id,
+                type: 'audio',
+                fadeIn: 0,
+                fadeOut: 0,
+                volume: 1,
+                mediaLibraryId: stock.id
+            };
+            updatedClips = [...updatedClips, timelineClip];
+            const newEndTime = timelineClip.offset + timelineClip.duration;
+            updatedDuration = Math.max(p.duration, newEndTime + 10);
+            updatedCurrentTime = newEndTime;
+        } else {
+            const targetTrack = p.tracks.find(t => t.type === stock.type);
+            if (!targetTrack) {
+                alert(`No track available for ${stock.type} clips.`);
+                return p;
+            }
+            const newClip: Clip = {
+              id: crypto.randomUUID(),
+              name: stock.name,
+              url: stock.url,
+              duration: stock.duration,
+              start: 0,
+              end: stock.duration,
+              offset: p.currentTime,
+              track: targetTrack.id,
+              type: stock.type,
+              fadeIn: 0,
+              fadeOut: 0,
+              volume: 1,
+              mediaLibraryId: stock.id,
+              scale: 1,
+              x: centerX,
+              y: centerY
+            };
+            
+            updatedClips = [...updatedClips, newClip];
+            const newEndTime = newClip.offset + newClip.duration;
+            updatedDuration = Math.max(p.duration, newEndTime + 10);
+            updatedCurrentTime = newEndTime;
+        }
+
+        return {
+            ...p,
+            clips: updatedClips,
+            duration: updatedDuration,
+            currentTime: updatedCurrentTime
+        };
+    });
   };
 
   const handleAddTextClip = () => {
@@ -657,10 +782,17 @@ const App: FC = () => {
   };
 
   const handleResolutionChange = (e: ChangeEvent<HTMLSelectElement>) => {
-      const selected = RESOLUTIONS.find(r => r.name === e.target.value);
+      const val = e.target.value;
+      if (val === 'Custom') return; // Do nothing, wait for input
+
+      const selected = RESOLUTIONS.find(r => r.name === val);
       if (selected) {
           setProject(p => ({ ...p, width: selected.width, height: selected.height }));
       }
+  };
+  
+  const handleDimensionsChange = (width: number, height: number) => {
+      setProject(p => ({ ...p, width, height }));
   };
 
   const handleFpsChange = (e: ChangeEvent<HTMLSelectElement>) => {
@@ -761,6 +893,7 @@ const App: FC = () => {
            <ProjectSettings 
                 project={project} 
                 onResolutionChange={handleResolutionChange}
+                onDimensionsChange={handleDimensionsChange}
                 onFpsChange={handleFpsChange}
            />
            <ClipProperties 
