@@ -1,3 +1,5 @@
+
+
 import React, { useRef, useEffect, useState, useCallback, useMemo, type FC } from 'react';
 import { Clip, ProjectState } from '../types';
 
@@ -47,8 +49,10 @@ const Player: FC<PlayerProps> = ({
   const lastUiUpdateRef = useRef<number>(0);
 
   // Independent time tracker to decouple render loop from React state updates
+  // This is the MASTER CLOCK.
   const internalTimeRef = useRef<number>(0); 
   const playbackSpeedRef = useRef<number>(1);
+  const prevSeekTimeRef = useRef<number>(0);
   
   // Export refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -93,12 +97,28 @@ const Player: FC<PlayerProps> = ({
     };
   }, []);
 
-  // Sync internal time with project time when NOT playing/exporting (e.g. scrubbing)
+  // Sync internal time with project time based on Seek events or Pause state
   useEffect(() => {
-    if (!project.isPlaying && !isInternalExporting.current) {
+    if (isInternalExporting.current) return;
+
+    // 1. Explicit Seek Detection (User Interaction)
+    if (project.lastSeekTime !== undefined && project.lastSeekTime !== prevSeekTimeRef.current) {
         internalTimeRef.current = project.currentTime;
+        prevSeekTimeRef.current = project.lastSeekTime;
+        
+        // Reset lastTimeRef so play loop doesn't calculate a huge dt
+        if (project.isPlaying) {
+             lastTimeRef.current = performance.now();
+        }
+    } 
+    // 2. Fallback Sync when NOT playing (e.g. stopped, or minor updates)
+    else if (!project.isPlaying) {
+        // Prevent drift when paused
+        if (Math.abs(internalTimeRef.current - project.currentTime) > 0.01) {
+            internalTimeRef.current = project.currentTime;
+        }
     }
-  }, [project.currentTime, project.isPlaying]);
+  }, [project.currentTime, project.isPlaying, project.lastSeekTime]);
 
   // Initialize video and audio elements for all clips
   useEffect(() => {
@@ -158,14 +178,16 @@ const Player: FC<PlayerProps> = ({
             video.preload = "auto";
             video.muted = false; // We use WebAudio to capture it
             video.playsInline = true; // Critical for iOS
+            video.setAttribute('playsinline', 'true');
+            video.setAttribute('webkit-playsinline', 'true');
             
             // Force browser to render this video element by making it visible but off-screen
             // This prevents "judder" caused by browser optimizing out hidden videos
             video.style.position = 'absolute';
             video.style.top = '0';
             video.style.left = '0';
-            video.style.width = '100%';
-            video.style.height = '100%';
+            video.style.width = '128px'; // Small but valid size
+            video.style.height = '128px';
             video.style.opacity = '0.01'; // Not 0 to ensure it's "visible"
             video.disablePictureInPicture = true;
             
@@ -173,6 +195,8 @@ const Player: FC<PlayerProps> = ({
             container.appendChild(video);
 
             video.onloadedmetadata = () => {
+                // Initial seek to start time
+                video.currentTime = clip.start;
                 setIsMediaLoaded(prev => !prev);
             };
             
@@ -200,33 +224,30 @@ const Player: FC<PlayerProps> = ({
                 console.warn("Audio Context Error (Video):", e);
             }
         }
-      } else if (clip.type === 'audio') {
+    } else if (clip.type === 'audio') {
         if (!audioRefs.current.has(clip.id)) {
             const audio = document.createElement('audio');
             audio.crossOrigin = "anonymous"; // Set before src
             audio.src = clip.url;
             audio.preload = "auto";
             
-            // Similar visibility hack for audio just in case
             audio.style.position = 'absolute';
             audio.style.opacity = '0.01';
 
             container.appendChild(audio);
             
             audio.onloadedmetadata = () => {
+                audio.currentTime = clip.start;
                 setIsMediaLoaded(prev => !prev);
             };
 
-            // Critical: Handle errors
             audio.onerror = () => {
                 console.error(`Failed to load audio clip: ${clip.name} (${clip.url})`);
-                // Mark loaded anyway so the UI doesn't block
                 setIsMediaLoaded(prev => !prev);
             };
 
             audioRefs.current.set(clip.id, audio);
 
-            // Connect Audio
             try {
                 const source = actx.createMediaElementSource(audio);
                 const gain = actx.createGain();
@@ -245,7 +266,7 @@ const Player: FC<PlayerProps> = ({
     });
   }, [project.clips]);
 
-  // Handle Play/Pause Audio Context state for normal playback
+  // Handle Play/Pause Audio Context state
   useEffect(() => {
     if (project.isPlaying && audioContextRef.current?.state === 'suspended') {
         audioContextRef.current.resume();
@@ -257,43 +278,95 @@ const Player: FC<PlayerProps> = ({
       return project.clips.reduce((max, c) => Math.max(max, c.offset + (c.end - c.start)), 0);
   }, [project.clips]);
 
+
+  // Determine the Actual Render Resolution
+  // Optimization: When not exporting, we render at the display size to save GPU.
+  // When exporting, we render at full project resolution.
+  const renderWidth = isExporting ? project.width : width;
+  const renderHeight = isExporting ? project.height : height;
+
+  // Calculate scaling factor between Project Coordinates (logical) and Render Coordinates (physical)
+  const scaleX = renderWidth / project.width;
+  const scaleY = renderHeight / project.height;
+
   // Main Render Loop Function (Defined before use)
   const renderFrameLogic = useCallback((currentTime: number) => {
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext('2d', { alpha: false, desynchronized: true });
     if (!canvas || !ctx) return;
 
-    // Use Project Resolution
-    const canvasWidth = project.width;
-    const canvasHeight = project.height;
-
     // Clear canvas
     ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+    ctx.fillRect(0, 0, renderWidth, renderHeight);
 
-    // Identify clips active at this time
+    // Apply Coordinate Scaling
+    // All drawing operations below this line use Project Coordinates (e.g. 1920x1080),
+    // but the context automatically scales them to the actual canvas size (e.g. 800x450).
+    ctx.save();
+    ctx.scale(scaleX, scaleY);
+
+    // 1. Identify active clips
     const activeClips = project.clips.filter(clip => 
         currentTime >= clip.offset && 
         currentTime < clip.offset + (clip.end - clip.start)
     );
 
+    // 2. Identify Upcoming Clips (for Warm-up / Pre-roll)
+    // We look ahead 1.0s. If a clip is about to start, we ensure it is parked at its start time.
+    const upcomingClips = project.clips.filter(clip => 
+        clip.offset > currentTime && 
+        clip.offset < currentTime + 1.0
+    );
+
     const activeClipIds = new Set(activeClips.map(c => c.id));
     const isRunning = project.isPlaying || isInternalExporting.current;
 
-    // --- Performance Optimization: Pause Inactive Media ---
-    // If we don't pause inactive clips, the browser tries to decode everything simultaneously, causing stutter.
-    videoRefs.current.forEach((video, id) => {
-        if (!activeClipIds.has(id)) {
-            if (!video.paused) video.pause();
-        }
-    });
-    audioRefs.current.forEach((audio, id) => {
-        if (!activeClipIds.has(id)) {
-            if (!audio.paused) audio.pause();
+    // --- WARM UP LOGIC (Fixes Flash Frames) ---
+    upcomingClips.forEach(clip => {
+        let mediaEl: HTMLMediaElement | undefined;
+        if (clip.type === 'video') mediaEl = videoRefs.current.get(clip.id);
+        else if (clip.type === 'audio') mediaEl = audioRefs.current.get(clip.id);
+
+        if (mediaEl) {
+            // Ensure paused
+            if (!mediaEl.paused) {
+                mediaEl.pause();
+                mediaEl.playbackRate = 1.0;
+            }
+            // Ensure parked at start time
+            if (Math.abs(mediaEl.currentTime - clip.start) > 0.05) {
+                mediaEl.currentTime = clip.start;
+            }
         }
     });
 
-    // 1. Handle Audio & Video Sync for ALL active clips
+    // --- PAUSE LOGIC ---
+    // Pause any clips that are NOT active and NOT in the warm-up window
+    videoRefs.current.forEach((video, id) => {
+        const clip = project.clips.find(c => c.id === id);
+        // Keep active and upcoming clips "alive"
+        const isUpcoming = clip && clip.offset > currentTime && clip.offset < currentTime + 1.0;
+        
+        if (!activeClipIds.has(id) && !isUpcoming) {
+            if (!video.paused) {
+                video.pause();
+                video.currentTime = clip ? clip.start : 0; // Reset
+            }
+        }
+    });
+    audioRefs.current.forEach((audio, id) => {
+        const clip = project.clips.find(c => c.id === id);
+        const isUpcoming = clip && clip.offset > currentTime && clip.offset < currentTime + 1.0;
+        
+        if (!activeClipIds.has(id) && !isUpcoming) {
+            if (!audio.paused) {
+                audio.pause();
+                audio.currentTime = clip ? clip.start : 0;
+            }
+        }
+    });
+
+    // --- SYNC & RENDER LOGIC ---
     activeClips.forEach(clip => {
         let mediaEl: HTMLMediaElement | undefined;
         if (clip.type === 'video') {
@@ -302,55 +375,50 @@ const Player: FC<PlayerProps> = ({
             mediaEl = audioRefs.current.get(clip.id);
         }
 
-        // Logic for video/audio clips
-        if (mediaEl && (mediaEl.readyState >= 2 || clip.type === 'audio')) { 
-             const clipTime = (currentTime - clip.offset) + clip.start;
+        if (mediaEl) { 
+             const targetClipTime = (currentTime - clip.offset) + clip.start;
              
              if (isRunning) {
-                 // Play Mode
-                 
-                 // Sync Check
-                 const drift = mediaEl.currentTime - clipTime;
-                 const isSeeking = mediaEl.seeking; // Crucial check to prevent seek loops
+                 // --- PLAYBACK MODE (Master Clock Drives) ---
+                 const drift = mediaEl.currentTime - targetClipTime;
+                 const isSeeking = mediaEl.seeking;
 
-                 // Relaxed Tolerance: 0.5s.
-                 // If the video is within 0.5s of the timeline, let it play naturally.
-                 // Forcing seeks (mediaEl.currentTime = ...) causes visual stutter and audio gaps.
-                 if (!isSeeking && Math.abs(drift) > 0.5) {
-                     // Only seek if we are significantly off track
-                     mediaEl.currentTime = clipTime;
-                 }
-                 
-                 // Resume if paused
                  if (mediaEl.paused) {
-                     // If we are resuming from a pause, ensure we are close enough
-                     // If we are just slightly off (e.g. 0.1s), don't force a seek, just play.
-                     if (Math.abs(drift) > 0.15) {
-                         mediaEl.currentTime = clipTime;
+                     // Clip just started or resumed.
+                     // Seek to exact start if significant drift
+                     if (Math.abs(drift) > 0.05) {
+                         mediaEl.currentTime = targetClipTime;
+                     } 
+                     // Play if ready
+                     if (mediaEl.readyState >= 2) {
+                         const playPromise = mediaEl.play();
+                         if (playPromise !== undefined) playPromise.catch(() => {});
                      }
-                     
-                     const playPromise = mediaEl.play();
-                     if (playPromise !== undefined) {
-                         playPromise.catch(() => {
-                             // Ignore auto-play interruptions
-                         });
+                 } else {
+                     // Already Playing - Check Drift
+                     // Relaxed threshold to 0.25s to allow for browser timing jitter without stuttering.
+                     if (Math.abs(drift) > 0.25) {
+                         // Only seek if drift is massive
+                         if (!isSeeking) {
+                             mediaEl.currentTime = targetClipTime;
+                         }
+                     }
+                     // Removed adaptive playbackRate scaling. 
+                     // Trusting the browser to play at 1.0x is smoother than constant micro-adjustments.
+                     if (mediaEl.playbackRate !== 1.0) {
+                         mediaEl.playbackRate = 1.0;
                      }
                  }
              } else {
-                 // Scrub Mode
-                 if (!mediaEl.paused) mediaEl.pause();
-                 
-                 // In scrub mode, we want exact frames, but we throttle 'seeking' if possible?
-                 // Actually, for scrubbing, we just set currentTime.
-                 // To prevent jitter, we can check if it's already close
-                 if (Math.abs(mediaEl.currentTime - clipTime) > 0.05) {
-                     mediaEl.currentTime = clipTime;
+                 // --- SCRUB MODE (Paused) ---
+                 if (!mediaEl.paused) {
+                     mediaEl.pause();
                  }
-             }
-
-             // End of clip check (Local check to ensure no overshoot)
-             if (clipTime >= clip.duration) {
-                 if (!mediaEl.paused) mediaEl.pause();
+                 
+                 // Strict Scrub Sync
+                 if (Math.abs(mediaEl.currentTime - targetClipTime) > 0.01) {
+                     mediaEl.currentTime = targetClipTime;
+                 }
              }
 
              // Handle Fading (Audio Volume)
@@ -360,7 +428,6 @@ const Player: FC<PlayerProps> = ({
              const relativeTime = currentTime - clip.offset;
              const remainingTime = (clip.offset + (clip.end - clip.start)) - currentTime;
 
-             // Prioritize explicit transition duration if exists for entry, otherwise fade
              const entryDuration = clip.transition ? clip.transition.duration : (clip.fadeIn || 0);
 
              if (entryDuration > 0 && relativeTime < entryDuration) {
@@ -373,10 +440,9 @@ const Player: FC<PlayerProps> = ({
                  gainNode.gain.value = alpha; 
              }
              
-             // Store alpha for video drawing (if basic fade)
              (clip as any)._renderAlpha = alpha; 
         } else if (clip.type === 'text') {
-             // Logic for text clips (Just fade calculation)
+             // Logic for text clips
              let alpha = 1;
              const relativeTime = currentTime - clip.offset;
              const remainingTime = (clip.offset + (clip.end - clip.start)) - currentTime;
@@ -392,39 +458,42 @@ const Player: FC<PlayerProps> = ({
         }
     });
 
-    // 2. Draw Video Frames (Sorted by track to respect layers)
+    // 2. Draw Video Frames (Sorted by track)
     activeClips
         .filter(c => c.type === 'video')
         .sort((a, b) => a.track - b.track)
         .forEach(clip => {
             const video = videoRefs.current.get(clip.id);
-            if (video && video.readyState >= 2) {
+            if (video && video.readyState >= 1) { // HAVE_METADATA or better
+                
+                const relativeTime = currentTime - clip.offset;
+
                 // Calculate Aspect Ratio Fit (Letterbox)
+                // We use project.width/height because of ctx.scale
                 const vw = video.videoWidth;
                 const vh = video.videoHeight;
-                const canvasAspect = canvasWidth / canvasHeight;
+                const canvasAspect = project.width / project.height;
                 const videoAspect = vw / vh;
                 
                 let drawW, drawH, offsetX, offsetY;
                 
                 if (videoAspect > canvasAspect) {
-                    // Video is wider than canvas
-                    drawW = canvasWidth;
-                    drawH = canvasWidth / videoAspect;
+                    // Video is wider
+                    drawW = project.width;
+                    drawH = project.width / videoAspect;
                     offsetX = 0;
-                    offsetY = (canvasHeight - drawH) / 2;
+                    offsetY = (project.height - drawH) / 2;
                 } else {
-                    // Video is taller than canvas
-                    drawH = canvasHeight;
-                    drawW = canvasHeight * videoAspect;
+                    // Video is taller
+                    drawH = project.height;
+                    drawW = project.height * videoAspect;
                     offsetY = 0;
-                    offsetX = (canvasWidth - drawW) / 2;
+                    offsetX = (project.width - drawW) / 2;
                 }
                 
                 ctx.save();
 
                 // Apply Transition Effects
-                const relativeTime = currentTime - clip.offset;
                 if (clip.transition && relativeTime < clip.transition.duration) {
                     const p = relativeTime / clip.transition.duration; // 0.0 to 1.0
                     
@@ -433,29 +502,25 @@ const Player: FC<PlayerProps> = ({
                             ctx.globalAlpha = p;
                             break;
                         case 'wipe-right':
-                            // Reveal from left to right
                             ctx.beginPath();
-                            ctx.rect(0, 0, canvasWidth * p, canvasHeight);
+                            ctx.rect(0, 0, project.width * p, project.height);
                             ctx.clip();
                             break;
                         case 'wipe-left':
-                            // Reveal from right to left
                             ctx.beginPath();
-                            ctx.rect(canvasWidth * (1 - p), 0, canvasWidth * p, canvasHeight);
+                            ctx.rect(project.width * (1 - p), 0, project.width * p, project.height);
                             ctx.clip();
                             break;
                         case 'slide-right':
-                            // Slide in from left
-                            ctx.translate(-canvasWidth * (1 - p), 0);
+                            ctx.translate(-project.width * (1 - p), 0);
                             break;
                         case 'slide-left':
-                            // Slide in from right
-                            ctx.translate(canvasWidth * (1 - p), 0);
+                            ctx.translate(project.width * (1 - p), 0);
                             break;
                         case 'circle':
                             ctx.beginPath();
-                            const maxRadius = Math.sqrt(Math.pow(canvasWidth, 2) + Math.pow(canvasHeight, 2));
-                            ctx.arc(canvasWidth / 2, canvasHeight / 2, maxRadius * p, 0, Math.PI * 2);
+                            const maxRadius = Math.sqrt(Math.pow(project.width, 2) + Math.pow(project.height, 2));
+                            ctx.arc(project.width / 2, project.height / 2, maxRadius * p, 0, Math.PI * 2);
                             ctx.clip();
                             break;
                         default:
@@ -463,13 +528,13 @@ const Player: FC<PlayerProps> = ({
                             break;
                     }
                 } else {
-                    // Basic fade fallback (fade out or manual fade in)
+                    // Basic fade fallback
                     ctx.globalAlpha = (clip as any)._renderAlpha;
                 }
                 
                 ctx.drawImage(video, offsetX, offsetY, drawW, drawH);
                 
-                ctx.restore(); // Restore context (removes clips, alphas, translations)
+                ctx.restore(); 
             }
         });
 
@@ -485,14 +550,14 @@ const Player: FC<PlayerProps> = ({
                  const p = relativeTime / clip.transition.duration;
                  switch (clip.transition.type) {
                     case 'fade': ctx.globalAlpha = p; break;
-                    case 'wipe-right': ctx.beginPath(); ctx.rect(0, 0, canvasWidth * p, canvasHeight); ctx.clip(); break;
-                    case 'wipe-left': ctx.beginPath(); ctx.rect(canvasWidth * (1 - p), 0, canvasWidth * p, canvasHeight); ctx.clip(); break;
-                    case 'slide-right': ctx.translate(-canvasWidth * (1 - p), 0); break;
-                    case 'slide-left': ctx.translate(canvasWidth * (1 - p), 0); break;
+                    case 'wipe-right': ctx.beginPath(); ctx.rect(0, 0, project.width * p, project.height); ctx.clip(); break;
+                    case 'wipe-left': ctx.beginPath(); ctx.rect(project.width * (1 - p), 0, project.width * p, project.height); ctx.clip(); break;
+                    case 'slide-right': ctx.translate(-project.width * (1 - p), 0); break;
+                    case 'slide-left': ctx.translate(project.width * (1 - p), 0); break;
                     case 'circle': 
                          ctx.beginPath();
-                         const maxRadius = Math.sqrt(Math.pow(canvasWidth, 2) + Math.pow(canvasHeight, 2));
-                         ctx.arc(canvasWidth / 2, canvasHeight / 2, maxRadius * p, 0, Math.PI * 2);
+                         const maxRadius = Math.sqrt(Math.pow(project.width, 2) + Math.pow(project.height, 2));
+                         ctx.arc(project.width / 2, project.height / 2, maxRadius * p, 0, Math.PI * 2);
                          ctx.clip();
                          break;
                     default: ctx.globalAlpha = (clip as any)._renderAlpha; break;
@@ -506,16 +571,18 @@ const Player: FC<PlayerProps> = ({
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             
-            // X and Y defaults (Center if not set)
-            const x = clip.x !== undefined ? clip.x : canvasWidth / 2;
-            const y = clip.y !== undefined ? clip.y : canvasHeight / 2;
+            const x = clip.x !== undefined ? clip.x : project.width / 2;
+            const y = clip.y !== undefined ? clip.y : project.height / 2;
             
             ctx.fillText(clip.textContent || "", x, y);
             
             ctx.restore();
         });
 
-  }, [project.clips, project.width, project.height, project.isPlaying]);
+    // Restore Coordinate Scale for next frame (though we clear, it's good practice)
+    ctx.restore();
+
+  }, [project.clips, renderWidth, renderHeight, scaleX, scaleY, project.isPlaying, project.width, project.height]);
 
 
   // Export Logic
@@ -545,7 +612,7 @@ const Player: FC<PlayerProps> = ({
                 
                 // 2. Prepare Stream
                 // Use project configured frame rate for export
-                const fps = project.fps || 25;
+                const fps = project.fps || 24;
                 const canvasStream = canvasRef.current.captureStream(fps); 
                 const combinedTracks = [...canvasStream.getVideoTracks()];
 
@@ -562,9 +629,8 @@ const Player: FC<PlayerProps> = ({
                 const combinedStream = new MediaStream(combinedTracks);
 
                 // 3. Select Best Supported MIME Type
-                // Priorities: Simple MP4 -> Specific MP4 -> WebM
                 const optionsToTry = [
-                    'video/mp4', // Modern browsers often default to H264/AAC with this
+                    'video/mp4',
                     'video/mp4;codecs=h264,aac',
                     'video/webm;codecs=h264',
                     'video/webm'
@@ -587,7 +653,6 @@ const Player: FC<PlayerProps> = ({
                 }
 
                 if (!recorder) {
-                    // Fallback to default
                     try {
                         recorder = new MediaRecorder(combinedStream);
                         selectedMimeType = recorder.mimeType;
@@ -614,7 +679,7 @@ const Player: FC<PlayerProps> = ({
 
                     if (blob.size === 0) {
                         console.error("Recorded blob is empty");
-                        alert("Export failed: Video data is empty. The recording duration might have been too short or the format is unsupported on this device.");
+                        alert("Export failed: Video data is empty.");
                         if (onExportFinish) onExportFinish(null);
                     } else {
                         const url = URL.createObjectURL(blob);
@@ -626,7 +691,6 @@ const Player: FC<PlayerProps> = ({
                 };
 
                 // 5. Start Recording & Playback
-                // Use default start() without timeslice to let browser manage atoms for MP4
                 recorder.start(); 
                 mediaRecorderRef.current = recorder;
                 
@@ -650,7 +714,7 @@ const Player: FC<PlayerProps> = ({
     };
 
     initExport();
-  }, [isExporting, onExportFinish, project.clips, project.currentTime, project.fps]); // Depend on start time
+  }, [isExporting, onExportFinish, project.clips, project.currentTime, project.fps, renderFrameLogic, project.width, project.height]);
 
 
   // Animation Loop
@@ -664,21 +728,17 @@ const Player: FC<PlayerProps> = ({
     const now = performance.now();
     
     // Frame Rate Throttling Logic
-    // Only throttle if we are EXPORTING. 
-    // For Preview/Editing, we want max smoothness (60/120Hz) to prevent UI judder.
     let shouldRender = true;
     let dt = 0;
 
     if (isExportingActive) {
         // Enforce strict FPS during export
-        const fps = project.fps || 25;
+        const fps = project.fps || 24;
         const fpsInterval = 1000 / fps;
         const delta = now - lastRenderTimeRef.current;
         
         if (delta > fpsInterval) {
-            // Adjust for timer drift
             lastRenderTimeRef.current = now - (delta % fpsInterval);
-            // In export, we simulate time passage exactly per frame
             dt = 1 / fps; 
             shouldRender = true;
         } else {
@@ -686,12 +746,13 @@ const Player: FC<PlayerProps> = ({
         }
     } else {
         // Normal Playback: Run as fast as possible (Monitor Refresh Rate)
-        // This avoids judder between 60Hz monitor and 25fps logic.
         shouldRender = true;
         if (lastTimeRef.current === null) {
             dt = 0;
         } else {
             dt = (now - lastTimeRef.current) / 1000;
+            // Cap DT to prevent massive jumps (e.g. if tab backgrounded)
+            if (dt > 0.1) dt = 0.1; 
         }
         lastTimeRef.current = now;
     }
@@ -705,7 +766,7 @@ const Player: FC<PlayerProps> = ({
             } else {
                 internalTimeRef.current += dt * playbackSpeedRef.current;
 
-                // LOOP LOGIC (Simplified: Implicit Loop only)
+                // LOOP LOGIC
                 if (project.isLooping && !isExportingActive) {
                     if (contentDuration > 0) {
                         if (internalTimeRef.current >= contentDuration) {
@@ -715,8 +776,6 @@ const Player: FC<PlayerProps> = ({
                 }
                 
                 // Sync Parent UI (THROTTLED)
-                // We only update the React State (which causes full re-renders) every 100ms
-                // The Canvas renders at full 60fps independently using internalTimeRef
                 if (now - lastUiUpdateRef.current > 100) {
                     onTimeUpdate(internalTimeRef.current);
                     lastUiUpdateRef.current = now;
@@ -729,18 +788,12 @@ const Player: FC<PlayerProps> = ({
         // Stop Export check
         const effectiveEndTime = isExporting && exportEndTime !== undefined ? exportEndTime : project.duration;
         if (isExportingActive && internalTimeRef.current >= effectiveEndTime) {
-            // Delayed Stop Logic to ensure last frames are captured
             if (!isStoppingRef.current) {
                 isStoppingRef.current = true;
-                console.log("Export duration reached. Stopping in 500ms...");
-                
-                // Continue rendering for 500ms to allow recorder to catch up
                 setTimeout(() => {
                     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
                         mediaRecorderRef.current.stop();
-                        // State cleanup happens in onstop event
                     } else {
-                        // If something weird happened and state is already inactive
                         isInternalExporting.current = false;
                         if (onExportFinish) onExportFinish(null);
                     }
@@ -807,8 +860,12 @@ const Player: FC<PlayerProps> = ({
         const dx = clientX - dragStartRef.current.x;
         const dy = clientY - dragStartRef.current.y;
         
-        // Calculate Scale Factor (Resolution vs Display Size)
-        const scale = project.width / width; // Assuming uniform scaling due to Aspect Ratio maintenance in App.tsx
+        // Scale Factor calculation: Project Pixels per Screen Pixel
+        const pScaleX = project.width / renderWidth;
+        const pScaleY = project.height / renderHeight;
+        
+        // Use average scale or strictly X? X is safer for 1:1 movement feels
+        const scale = pScaleX;
         
         const newX = dragStartRef.current.originalX + (dx * scale);
         const newY = dragStartRef.current.originalY + (dy * scale);
@@ -836,7 +893,7 @@ const Player: FC<PlayerProps> = ({
         window.removeEventListener('touchmove', handleMove);
         window.removeEventListener('touchend', handleUp);
     };
-  }, [draggingTextId, width, project.width, onClipUpdate, project.clips]);
+  }, [draggingTextId, renderWidth, renderHeight, project.width, project.height, onClipUpdate, project.clips]);
 
 
   return (
@@ -866,8 +923,7 @@ const Player: FC<PlayerProps> = ({
                          project.selectedClipId === c.id
             )
             .map(clip => {
-                 // Convert Clip Coords to Screen Coords
-                 const scale = width / project.width;
+                 const scale = renderWidth / project.width;
                  const screenX = (clip.x !== undefined ? clip.x : project.width / 2) * scale;
                  const screenY = (clip.y !== undefined ? clip.y : project.height / 2) * scale;
                  
@@ -890,8 +946,8 @@ const Player: FC<PlayerProps> = ({
 
       <canvas 
         ref={canvasRef}
-        width={project.width}
-        height={project.height}
+        width={renderWidth}
+        height={renderHeight}
         className="w-full h-full block"
       />
       

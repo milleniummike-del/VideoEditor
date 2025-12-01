@@ -35,6 +35,7 @@ const App: FC = () => {
         width: RESOLUTIONS[0].width,
         height: RESOLUTIONS[0].height,
         fps: DEFAULT_FPS,
+        lastSeekTime: 0,
     };
   });
 
@@ -125,7 +126,11 @@ const App: FC = () => {
 
   const handleSeek = (time: number) => {
     if (isExporting) return;
-    setProject(p => ({ ...p, currentTime: time }));
+    setProject(p => ({ 
+        ...p, 
+        currentTime: time,
+        lastSeekTime: Date.now() // Trigger player sync
+    }));
   };
 
   const handleTogglePlay = useCallback(() => {
@@ -661,6 +666,7 @@ const App: FC = () => {
         width: loadedProject.width || RESOLUTIONS[0].width,
         height: loadedProject.height || RESOLUTIONS[0].height,
         fps: loadedProject.fps || DEFAULT_FPS,
+        lastSeekTime: Date.now(), // Force sync on load
     };
 
     setProject(safeProject);

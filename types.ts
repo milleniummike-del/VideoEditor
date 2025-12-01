@@ -57,6 +57,7 @@ export interface ProjectState {
   width: number; // Project Resolution Width
   height: number; // Project Resolution Height
   fps: number; // Project Frame Rate
+  lastSeekTime?: number; // Timestamp of last manual seek to force player sync
 }
 
 export interface GeminiAnalysis {

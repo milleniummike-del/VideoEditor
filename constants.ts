@@ -3,7 +3,7 @@
 export const TIMELINE_HEIGHT = 200;
 export const TRACK_HEIGHT = 80;
 export const PIXELS_PER_SECOND_DEFAULT = 20;
-export const DEFAULT_FPS = 25;
+export const DEFAULT_FPS = 24;
 
 export const RESOLUTIONS = [
   { name: 'Landscape (1080p)', width: 1920, height: 1080 },
